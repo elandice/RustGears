@@ -1,0 +1,28 @@
+[package]
+name = "rustorch"
+version = "0.1.0"
+edition = "2021"
+description = "A PyTorch/TensorFlow-style machine learning library written in Rust (autograd, nn, optim, GPU via wgpu, data-parallel, NPU inference)"
+license = "MIT"
+readme = "README.md"
+
+[features]
+default = ["gpu"]
+# GPU backend (Vulkan / DirectX12 / Metal via wgpu compute shaders)
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
+[dependencies]
+rayon = "1.10"
+wgpu = { version = "0.19", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+debug = false
+lto = "thin"
