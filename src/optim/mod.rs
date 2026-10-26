@@ -1,9 +1,13 @@
 //! Optimisation algorithms (like `torch.optim`).
 
 pub mod callback;
+pub mod ema;
+pub mod progress;
 pub mod scheduler;
 
 pub use callback::{EarlyStopping, EarlyStoppingMode, GradientAccumulator, ModelCheckpoint};
+pub use ema::ModelEMA;
+pub use progress::ProgressBar;
 pub use scheduler::{
     CosineAnnealingLr, ExponentialLr, LrScheduler, PlateauMode, ReduceLROnPlateau, StepLr, WarmupCosineLr,
 };

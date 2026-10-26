@@ -6,6 +6,8 @@ use crate::device::Device;
 use crate::rng::Rng;
 use crate::tensor::Tensor;
 use rayon::prelude::*;
+use std::sync::mpsc::{sync_channel, Receiver};
+use std::thread::{Scope, ScopedJoinHandle};
 
 /// A map-style dataset of `(input, target)` samples.
 pub trait Dataset: Send + Sync {
@@ -33,6 +35,7 @@ pub struct TensorDataset {
 
 impl TensorDataset {
     pub fn new(x: &Tensor, y: &Tensor) -> Self {
+        assert!(x.ndim() > 0 && y.ndim() > 0, "TensorDataset: tensors must have a sample dimension");
         assert_eq!(x.shape()[0], y.shape()[0], "TensorDataset: x and y must have the same number of samples");
         TensorDataset {
             x: x.to_vec(),
@@ -45,6 +48,7 @@ impl TensorDataset {
 
     /// Split into (train, test) with the given test fraction (shuffled with `seed`).
     pub fn train_test_split(&self, test_fraction: f32, seed: u64) -> (TensorDataset, TensorDataset) {
+        assert!((0.0..=1.0).contains(&test_fraction), "test_fraction must be in [0, 1]");
         let mut idx: Vec<usize> = (0..self.n).collect();
         Rng::new(seed).shuffle(&mut idx);
         let n_test = (self.n as f32 * test_fraction).round() as usize;
@@ -140,6 +144,10 @@ impl<'a> DataLoader<'a> {
 
     /// One epoch of `(inputs, targets)` batches.
     pub fn iter(&mut self) -> impl Iterator<Item = (Tensor, Tensor)> + '_ {
+        self.batches(true)
+    }
+
+    fn batches(&mut self, parallel_samples: bool) -> impl Iterator<Item = (Tensor, Tensor)> + '_ {
         let mut order: Vec<usize> = (0..self.dataset.len()).collect();
         if self.shuffle {
             self.rng.shuffle(&mut order);
@@ -150,12 +158,21 @@ impl<'a> DataLoader<'a> {
         let device = self.device;
         let xs = ds.input_shape();
         let ys = ds.target_shape();
-        let chunks: Vec<Vec<usize>> = order.chunks(bs).filter(|c| !drop_last || c.len() == bs).map(|c| c.to_vec()).collect();
-        chunks.into_iter().map(move |idx| {
-            let samples: Vec<(Vec<f32>, Vec<f32>)> = idx.par_iter().map(|&i| ds.get(i)).collect();
+        let n = order.len();
+        (0..n).step_by(bs).filter(move |&start| !drop_last || n - start >= bs).map(move |start| {
+            let idx = &order[start..start + bs.min(n - start)];
+            let samples: Vec<(Vec<f32>, Vec<f32>)> = if parallel_samples {
+                idx.par_iter().map(|&i| ds.get(i)).collect()
+            } else {
+                idx.iter().map(|&i| ds.get(i)).collect()
+            };
             let mut x = Vec::new();
             let mut y = Vec::new();
+            let xn: usize = xs.iter().product();
+            let yn: usize = ys.iter().product();
             for (a, b) in samples {
+                assert_eq!(a.len(), xn, "Dataset::get returned the wrong input size");
+                assert_eq!(b.len(), yn, "Dataset::get returned the wrong target size");
                 x.extend(a);
                 y.extend(b);
             }
@@ -165,5 +182,70 @@ impl<'a> DataLoader<'a> {
             yshape.extend(&ys);
             (Tensor::from_vec(x, &xshape).on(device), Tensor::from_vec(y, &yshape).on(device))
         })
+    }
+
+    /// Prepare up to `capacity` batches ahead on a background thread. Sample
+    /// reads use Rayon unless called inside a Rayon worker, avoiding pool deadlocks.
+    /// Batches retain their original order.
+    /// Use inside `std::thread::scope` so borrowed datasets stay valid.
+    /// Dropping the iterator cancels pending sends and joins the producer.
+    pub fn iter_prefetch<'scope, 'env>(
+        &'env mut self,
+        scope: &'scope Scope<'scope, 'env>,
+        capacity: usize,
+    ) -> PrefetchIter<'scope>
+    where
+        'a: 'env,
+    {
+        assert!(capacity > 0, "prefetch capacity must be > 0");
+        // A blocked Rayon consumer must not occupy the pool needed by the producer.
+        let batches = self.batches(rayon::current_thread_index().is_none());
+        let (sender, receiver) = sync_channel(capacity);
+        let worker = scope.spawn(move || {
+            for batch in batches {
+                if sender.send(batch).is_err() {
+                    break;
+                }
+            }
+        });
+        PrefetchIter { receiver: Some(receiver), worker: Some(worker) }
+    }
+}
+
+/// Ordered, bounded batch prefetching returned by [`DataLoader::iter_prefetch`].
+pub struct PrefetchIter<'scope> {
+    receiver: Option<Receiver<(Tensor, Tensor)>>,
+    worker: Option<ScopedJoinHandle<'scope, ()>>,
+}
+
+impl Iterator for PrefetchIter<'_> {
+    type Item = (Tensor, Tensor);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.receiver.as_ref()?.recv() {
+            Ok(batch) => Some(batch),
+            Err(_) => {
+                self.receiver.take();
+                if let Some(worker) = self.worker.take() {
+                    if let Err(panic) = worker.join() {
+                        std::panic::resume_unwind(panic);
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+impl Drop for PrefetchIter<'_> {
+    fn drop(&mut self) {
+        self.receiver.take(); // Unblock a producer waiting on a full queue before joining.
+        if let Some(worker) = self.worker.take() {
+            if let Err(panic) = worker.join() {
+                if !std::thread::panicking() {
+                    std::panic::resume_unwind(panic);
+                }
+            }
+        }
     }
 }

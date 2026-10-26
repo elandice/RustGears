@@ -242,8 +242,8 @@ impl GpuContext {
         let bb = self.storage(b);
         let bc = self.output(m * n);
         let bu = self.uniform([m as u32, k as u32, n as u32, 0]);
-        let gx = ((n + 15) / 16) as u32;
-        let gy = ((m + 15) / 16) as u32;
+        let gx = n.div_ceil(16) as u32;
+        let gy = m.div_ceil(16) as u32;
         self.run(&self.matmul, [&ba, &bb, &bc, &bu], m * n, (gx, gy))
     }
 
@@ -256,9 +256,9 @@ impl GpuContext {
         };
         let bo = self.output(len);
         let bu = self.uniform([op, len as u32, 0, 0]);
-        let groups = ((len + 255) / 256) as u32;
+        let groups = len.div_ceil(256) as u32;
         let gx = groups.min(65535);
-        let gy = (groups + gx - 1) / gx;
+        let gy = groups.div_ceil(gx);
         self.run(&self.elemwise, [&ba, &bb, &bo, &bu], len, (gx, gy))
     }
 }

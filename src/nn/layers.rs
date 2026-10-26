@@ -149,6 +149,89 @@ impl Module for Conv2d {
 // Pooling / reshaping
 // ----------------------------------------------------------------------
 
+/// Transposed 2-D convolution on `[N,C,H,W]` (square kernels, one group).
+/// Weights use PyTorch's `[in_channels,out_channels,k,k]` layout.
+pub struct ConvTranspose2d {
+    pub weight: Tensor,
+    pub bias: Tensor,
+    pub in_channels: usize,
+    pub out_channels: usize,
+    pub kernel_size: usize,
+    pub stride: usize,
+    pub padding: usize,
+    pub output_padding: usize,
+}
+
+impl ConvTranspose2d {
+    pub fn new(in_channels: usize, out_channels: usize, kernel_size: usize) -> Self {
+        assert!(in_channels > 0 && out_channels > 0 && kernel_size > 0, "ConvTranspose2d dimensions must be positive");
+        let fan_in = out_channels * kernel_size * kernel_size;
+        Self {
+            weight: init::kaiming_uniform(&[in_channels, out_channels, kernel_size, kernel_size], fan_in).requires_grad_(true),
+            bias: init::bias_uniform(&[out_channels], fan_in).requires_grad_(true),
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride: 1,
+            padding: 0,
+            output_padding: 0,
+        }
+    }
+
+    pub fn stride(mut self, stride: usize) -> Self {
+        assert!(stride > 0, "ConvTranspose2d stride must be positive");
+        self.stride = stride;
+        self
+    }
+
+    pub fn padding(mut self, padding: usize) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    pub fn output_padding(mut self, output_padding: usize) -> Self {
+        self.output_padding = output_padding;
+        self
+    }
+}
+
+impl Module for ConvTranspose2d {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        x.conv_transpose2d(&self.weight, self.stride, self.padding, self.output_padding)
+            .add(&self.bias.reshape(&[1, self.out_channels, 1, 1]))
+    }
+
+    fn named_parameters(&self) -> Vec<(String, Tensor)> {
+        vec![("weight".into(), self.weight.clone()), ("bias".into(), self.bias.clone())]
+    }
+
+    fn name(&self) -> String {
+        format!("ConvTranspose2d({}, {}, k={}, s={}, p={}, op={})", self.in_channels, self.out_channels, self.kernel_size, self.stride, self.padding, self.output_padding)
+    }
+}
+
+/// Pool each channel to a fixed spatial resolution, including global `(1,1)` pooling.
+pub struct AdaptiveAvgPool2d {
+    pub output_size: (usize, usize),
+}
+
+impl AdaptiveAvgPool2d {
+    pub fn new(output_size: (usize, usize)) -> Self {
+        assert!(output_size.0 > 0 && output_size.1 > 0, "AdaptiveAvgPool2d output size must be positive");
+        Self { output_size }
+    }
+}
+
+impl Module for AdaptiveAvgPool2d {
+    fn forward(&self, x: &Tensor) -> Tensor {
+        x.adaptive_avg_pool2d(self.output_size)
+    }
+
+    fn name(&self) -> String {
+        format!("AdaptiveAvgPool2d({:?})", self.output_size)
+    }
+}
+
 pub struct MaxPool2d {
     pub kernel: usize,
     pub stride: usize,

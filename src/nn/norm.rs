@@ -40,6 +40,7 @@ impl BatchNorm {
     }
 
     fn with_spatial(num_features: usize, spatial: bool) -> Self {
+        assert!(num_features > 0, "BatchNorm feature count must be positive");
         BatchNorm {
             gamma: Tensor::ones(&[num_features]).requires_grad_(true),
             beta: Tensor::zeros(&[num_features]).requires_grad_(true),
@@ -57,17 +58,18 @@ impl BatchNorm {
 impl Module for BatchNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
         let c = self.num_features;
+        assert_eq!(x.ndim(), if self.spatial { 4 } else { 2 }, "BatchNorm input rank mismatch");
+        assert_eq!(x.shape()[1], c, "BatchNorm channel count mismatch");
         // bring channels to the last axis: [M, C]
         let (x2, back) = if self.spatial {
-            assert_eq!(x.ndim(), 4, "BatchNorm2d expects [N,C,H,W]");
             let (n, h, w) = (x.shape()[0], x.shape()[2], x.shape()[3]);
             (x.permute(&[0, 2, 3, 1]).reshape(&[n * h * w, c]), Some((n, h, w)))
         } else {
-            assert_eq!(x.ndim(), 2, "BatchNorm1d expects [N,C]");
             (x.clone(), None)
         };
 
         let xhat = if self.training.load(Ordering::Relaxed) {
+            assert!(x2.shape()[0] > 0, "BatchNorm training statistics must not be empty");
             let mean = x2.mean_dim(0, true);
             let var = x2.var_dim(0, true);
             // update running statistics (not part of the graph)
@@ -137,6 +139,7 @@ pub struct LayerNorm {
 
 impl LayerNorm {
     pub fn new(dim: usize) -> Self {
+        assert!(dim > 0, "LayerNorm dimension must be positive");
         LayerNorm {
             gamma: Tensor::ones(&[dim]).requires_grad_(true),
             beta: Tensor::zeros(&[dim]).requires_grad_(true),
@@ -148,6 +151,7 @@ impl LayerNorm {
 
 impl Module for LayerNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
+        assert_eq!(x.shape().last(), Some(&self.dim), "LayerNorm last dimension mismatch");
         let mean = x.mean_dim(-1, true);
         let var = x.var_dim(-1, true);
         x.sub(&mean).div(&var.add_scalar(self.eps).sqrt()).mul(&self.gamma).add(&self.beta)
@@ -174,6 +178,7 @@ pub struct RMSNorm {
 
 impl RMSNorm {
     pub fn new(dim: usize) -> Self {
+        assert!(dim > 0, "RMSNorm dimension must be positive");
         RMSNorm {
             weight: Tensor::ones(&[dim]).requires_grad_(true),
             dim,
@@ -189,6 +194,7 @@ impl RMSNorm {
 
 impl Module for RMSNorm {
     fn forward(&self, x: &Tensor) -> Tensor {
+        assert_eq!(x.shape().last(), Some(&self.dim), "RMSNorm last dimension mismatch");
         let rms = x.square().mean_dim(-1, true).add_scalar(self.eps).sqrt();
         x.div(&rms).mul(&self.weight)
     }

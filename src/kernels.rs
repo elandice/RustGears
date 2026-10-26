@@ -3,8 +3,10 @@
 
 /// Output spatial size of a convolution / pooling window.
 pub fn out_size(input: usize, kernel: usize, stride: usize, pad: usize) -> usize {
-    assert!(input + 2 * pad >= kernel, "kernel {kernel} larger than padded input {}", input + 2 * pad);
-    (input + 2 * pad - kernel) / stride + 1
+    assert!(kernel > 0 && stride > 0, "kernel and stride must be positive");
+    let padded = pad.checked_mul(2).and_then(|p| input.checked_add(p)).expect("padded input size overflow");
+    assert!(padded >= kernel, "kernel {kernel} larger than padded input {padded}");
+    (padded - kernel) / stride + 1
 }
 
 /// Unfold one image `[C,H,W]` into columns `[C*k*k, OH*OW]`.
@@ -78,11 +80,11 @@ pub fn max_pool2d(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, s
         for oy in 0..oh {
             for ox in 0..ow {
                 let mut best = f32::NEG_INFINITY;
-                let mut bi = 0;
+                let mut bi = base + oy * stride * w + ox * stride;
                 for ki in 0..k {
                     for kj in 0..k {
                         let idx = base + (oy * stride + ki) * w + ox * stride + kj;
-                        if x[idx] > best {
+                        if x[idx] > best || x[idx].is_nan() {
                             best = x[idx];
                             bi = idx;
                         }
@@ -98,7 +100,7 @@ pub fn max_pool2d(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, s
 
 /// Convolution forward for a batch using a matmul function
 /// (`W[O, C*k*k] @ cols[C*k*k, L]`). Returns `[N, O, OH, OW]` data.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn conv2d_forward(
     x: &[f32],
     weight: &[f32],

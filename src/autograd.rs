@@ -7,6 +7,7 @@
 use crate::tensor::Tensor;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 
 /// Backward closure: receives `dL/d(output)` and returns `dL/d(input_i)` for
 /// every input (or `None` if that input does not need a gradient).
@@ -34,15 +35,22 @@ pub fn set_grad_enabled(enabled: bool) {
 }
 
 /// RAII guard that disables gradient tracking until dropped.
+/// The guard stays on its creating thread because it restores thread-local state.
+///
+/// ```compile_fail
+/// let guard = rustorch::autograd::NoGradGuard::new();
+/// std::thread::spawn(move || drop(guard));
+/// ```
 pub struct NoGradGuard {
     prev: bool,
+    thread_bound: PhantomData<*mut ()>,
 }
 
 impl NoGradGuard {
     pub fn new() -> Self {
         let prev = is_grad_enabled();
         set_grad_enabled(false);
-        NoGradGuard { prev }
+        NoGradGuard { prev, thread_bound: PhantomData }
     }
 }
 

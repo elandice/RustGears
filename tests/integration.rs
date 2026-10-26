@@ -100,12 +100,15 @@ fn data_parallel_gradients_match_single_device() {
     // Single-device reference model
     manual_seed(99);
     let single = build();
-    // 4-device DataParallel model with identical initial weights
-    manual_seed(99);
+    // Other tests share the global RNG, so copy the reference weights explicitly.
     let dp = DataParallel::new(
         vec![Device::Gpu(0), Device::Gpu(1), Device::Gpu(2), Device::Gpu(3)],
         build,
     );
+    for (source, target) in single.parameters().iter().zip(dp.parameters()) {
+        target.copy_from_slice(&source.to_vec());
+    }
+    dp.broadcast_parameters();
 
     let x = Tensor::randn(&[16, 6]);
     let y = Tensor::from_slice(&[0.0, 1.0, 2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 2.0, 2.0, 1.0, 0.0, 0.0, 1.0, 2.0, 1.0], &[16]);

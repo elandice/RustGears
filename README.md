@@ -15,9 +15,10 @@
 | **신경망 레이어 (`nn`)** | `Linear`, `Conv2d`, `MaxPool2d`, `Flatten`, `BatchNorm1d`, `BatchNorm2d`, `LayerNorm`, **`RMSNorm`**, `Dropout`, `Embedding`, `MultiHeadAttention` (Causal Mask 지원), `TransformerEncoderLayer`, **`SwiGLU`**, `Sequential`, 활성화 함수(`Relu`, `Gelu`, `Sigmoid`, `Tanh`, `LeakyRelu`, **`Silu`**, `Softmax`), 초기화(`kaiming_uniform`, `xavier_uniform`) |
 | **손실 함수 & 지표 (`nn::loss`, `nn::metrics`)** | `cross_entropy`, `cross_entropy_smooth` (Label Smoothing), `mse_loss`, `l1_loss`, `huber_loss`, `nll_loss`, `bce_with_logits`, `accuracy`, **`precision_recall_f1`**, **`top_k_accuracy`**, **`confusion_matrix`** |
 | **옵티마이저 & 스케줄러 (`optim`)** | `Sgd` (Momentum / Nesterov), `Adam`, `AdamW` (Decoupled Weight Decay), `RmsProp`, `clip_grad_norm`, `StepLr`, `ExponentialLr`, `CosineAnnealingLr`, `WarmupCosineLr`, **`ReduceLROnPlateau`** |
-| **학습 제어 & 콜백 (`optim::callback`)** | **`EarlyStopping`** (Patience 감시 및 최적 가중치 자동 롤백), **`ModelCheckpoint`** (최고 성능 갱신 시 자동 저장), **`GradientAccumulator`** (대형 가상 배치 지원) |
+| **학습 제어 & 콜백 (`optim`)** | **`EarlyStopping`** (Patience 감시 및 최적 가중치 자동 롤백), **`ModelCheckpoint`** (최고 성능 갱신 시 자동 저장), **`GradientAccumulator`** (대형 가상 배치 지원), **`ModelEMA`**, **`ProgressBar`** |
+| **현대 모델 & 데이터 로딩** | **`KvCache`**, split-half **`RotaryEmbedding`** (RoPE), causal attention의 캐시 추론, **`DataLoader::iter_prefetch`** (bounded queue + 멀티스레드 샘플 로딩), **`AdaptiveAvgPool2d`**, **`ConvTranspose2d`** |
 | **NPU 추론 엔진 (`inference`)** | `InferenceSession`, `ExecutionProvider::Npu(NpuPrecision::{Int8, Fp16})`, **BatchNorm 폴딩**, **연산자 퓨전(`Linear/Conv2d + BN + Activation`)**, **INT8 대칭 양자화(`i8 × i8 -> i32` Systolic MAC)**, 레이어별 MAC/GOPS/압축률 프로파일링(`NpuProfile`) |
-| **직렬화 (`save`)** | 학습 체크포인트(`save_state_dict` / `load_state_dict`, `.rtsc`) 및 배포용 포터블 추론 그래프(`save_inference_model` / `load_inference_layers`, `.rtim`) |
+| **직렬화 (`save`)** | 학습 체크포인트(`save_state_dict` / `load_state_dict`, `.rtsc` / **`.safetensors`**), Safetensors F32 저장·F32/F16/BF16 읽기, 배포용 포터블 추론 그래프(`save_inference_model` / `load_inference_layers`, `.rtim`) |
 
 ---
 
@@ -85,6 +86,9 @@ cargo run --example transformer
 
 # 4) 통합 테스트 (수치 미분 검증, GPU 커널 검증, Ring All-Reduce, NPU 퓨전 등)
 cargo test
+
+# 5) Safetensors, KV-Cache/RoPE, 비동기 로더, 비전 레이어, EMA/진행 표시
+cargo run --example modern_features --no-default-features
 ```
 
 ### 2. 기본 학습 + NPU 추론 코드
@@ -137,4 +141,5 @@ fn main() -> Result<(), String> {
 
 ## 상세 문서
 
+- 추가된 다섯 기능의 API, 지원 범위와 분석·보완 결과는 **[docs/NEW_FEATURES.md](docs/NEW_FEATURES.md)** 에 정리되어 있습니다.
 - 전체 API 레퍼런스, 아키텍처 다이어그램(Autograd 역전파, WGSL GPU 타일링, Ring All-Reduce, NPU 연산자 퓨전 & INT8 양자화 파이프라인), 단계별 사용 가이드는 **[docs/USAGE.md](docs/USAGE.md)** 에 정리되어 있습니다.

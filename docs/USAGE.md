@@ -188,8 +188,8 @@ let mut accum = GradientAccumulator::new(/* accumulation_steps */ 4);
 let x = Tensor::randn(&[16, 10]);
 let y = Tensor::zeros(&[16]);
 
+opt.zero_grad();
 for epoch in 0..50 {
-    opt.zero_grad();
     let raw_loss = cross_entropy_smooth(&model.forward(&x), &y, /* label_smoothing */ 0.05);
     
     // 가상 배치 크기를 위해 손실 스케일링

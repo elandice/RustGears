@@ -13,6 +13,8 @@ gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 [dependencies]
 rayon = "1.10"
+safetensors = "0.8"
+tempfile = "3"
 wgpu = { version = "0.19", optional = true }
 pollster = { version = "0.3", optional = true }
 bytemuck = { version = "1", optional = true }

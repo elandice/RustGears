@@ -278,9 +278,8 @@ fn run_standard(input: &Tensor, device: Device, layers: &[LayerSpec]) -> Tensor 
                 let (mut y, oh, ow) = kernels::conv2d_forward(&data, weight, n, c, h, w, *out_channels, *kernel, *stride, *padding, &mm);
                 let spatial = oh * ow;
                 for b in 0..n {
-                    for o in 0..*out_channels {
+                    for (o, &bv) in bias.iter().enumerate().take(*out_channels) {
                         let base = (b * *out_channels + o) * spatial;
-                        let bv = bias[o];
                         for v in &mut y[base..base + spatial] {
                             *v += bv;
                         }

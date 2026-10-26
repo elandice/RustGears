@@ -100,10 +100,14 @@ impl<M: Module> DataParallel<M> {
     where
         L: Fn(&Tensor, &Tensor) -> Tensor + Sync,
     {
+        assert!(x.ndim() > 0 && y.ndim() > 0, "DataParallel inputs must have a batch dimension");
         let n = x.shape()[0];
+        assert!(n > 0, "DataParallel batch must not be empty");
+        assert_eq!(y.shape()[0], n, "DataParallel input and target batch sizes must match");
         let k = self.devices.len();
         // shard sizes (as even as possible)
-        let shards: Vec<(usize, usize)> = (0..k).map(|r| (r * n / k, (r + 1) * n / k - r * n / k)).collect();
+        let (base, extra) = (n / k, n % k);
+        let shards: Vec<(usize, usize)> = (0..k).map(|r| (r * base + r.min(extra), base + usize::from(r < extra))).collect();
 
         let loss_fn = &loss_fn;
         let replicas: Vec<ReplicaStats> = std::thread::scope(|s| {
@@ -143,7 +147,7 @@ impl<M: Module> DataParallel<M> {
                 for p in ps {
                     match p.grad_vec() {
                         Some(g) => b.extend(g.iter().map(|v| v * w)),
-                        None => b.extend(std::iter::repeat(0.0).take(p.numel())),
+                        None => b.extend(std::iter::repeat_n(0.0, p.numel())),
                     }
                 }
                 b

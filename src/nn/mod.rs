@@ -7,10 +7,10 @@ pub mod loss;
 pub mod metrics;
 pub mod norm;
 
-pub use attention::{MultiHeadAttention, TransformerEncoderLayer};
+pub use attention::{KvCache, MultiHeadAttention, RotaryEmbedding, TransformerEncoderLayer};
 pub use layers::{
-    Conv2d, Dropout, Embedding, Flatten, Gelu, Identity, LeakyRelu, Linear, MaxPool2d, Relu, Sigmoid, Silu, Softmax,
-    SwiGLU, Tanh,
+    AdaptiveAvgPool2d, Conv2d, ConvTranspose2d, Dropout, Embedding, Flatten, Gelu, Identity, LeakyRelu, Linear,
+    MaxPool2d, Relu, Sigmoid, Silu, Softmax, SwiGLU, Tanh,
 };
 pub use metrics::{confusion_matrix, precision_recall_f1, top_k_accuracy};
 pub use norm::{BatchNorm1d, BatchNorm2d, LayerNorm, RMSNorm};

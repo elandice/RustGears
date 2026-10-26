@@ -3,6 +3,7 @@
 use crate::nn::Module;
 use crate::save::save_state_dict;
 use crate::tensor::Tensor;
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -26,7 +27,7 @@ pub struct EarlyStopping {
     counter: usize,
     best_score: Option<f32>,
     early_stop: bool,
-    best_weights: Option<Vec<(String, Vec<f32>)>>,
+    best_weights: Option<Vec<(String, Tensor)>>,
 }
 
 impl EarlyStopping {
@@ -53,6 +54,7 @@ impl EarlyStopping {
 
     /// Set minimum change to qualify as an improvement.
     pub fn min_delta(mut self, delta: f32) -> Self {
+        assert!(delta.is_finite(), "min_delta must be finite");
         self.min_delta = delta.abs();
         self
     }
@@ -66,9 +68,10 @@ impl EarlyStopping {
     /// Check if the metric improved. Returns `true` if an improvement occurred.
     ///
     /// When `restore_best_weights` is active, snapshot of parameters is updated on improvement,
-    /// and automatically restored if early stopping triggers.
+    /// and automatically restored if early stopping triggers. Nonfinite scores
+    /// count as epochs without improvement and never replace the best snapshot.
     pub fn step(&mut self, score: f32, model: &dyn Module) -> bool {
-        let is_improved = match self.best_score {
+        let is_improved = score.is_finite() && match self.best_score {
             None => true,
             Some(best) => match self.mode {
                 EarlyStoppingMode::Min => score < (best - self.min_delta),
@@ -83,7 +86,7 @@ impl EarlyStopping {
                 let snapshot = model
                     .state_dict()
                     .into_iter()
-                    .map(|(name, tensor)| (name, tensor.to_vec()))
+                    .map(|(name, tensor)| (name, tensor.detach()))
                     .collect();
                 self.best_weights = Some(snapshot);
             }
@@ -100,18 +103,30 @@ impl EarlyStopping {
         }
     }
 
-    /// Restores the best weights to the model if recorded. Returns true if restored.
+    /// Restores the best parameters and buffers. Returns false without changing
+    /// the model if no snapshot exists or its names and shapes are incompatible.
     pub fn restore(&self, model: &dyn Module) -> bool {
-        if let Some(ref snapshot) = self.best_weights {
-            for (name, tensor) in model.state_dict() {
-                if let Some((_, data)) = snapshot.iter().find(|(n, _)| n == &name) {
-                    tensor.copy_from_slice(data);
-                }
-            }
-            true
-        } else {
-            false
+        let Some(snapshot) = &self.best_weights else { return false };
+        let state = model.state_dict();
+        if state.len() != snapshot.len() {
+            return false;
         }
+        let mut by_name: HashMap<_, _> = state.into_iter().collect();
+        if by_name.len() != snapshot.len() {
+            return false;
+        }
+        let mut compatible = Vec::with_capacity(snapshot.len());
+        for (name, saved) in snapshot {
+            let Some(tensor) = by_name.remove(name) else { return false };
+            if tensor.shape() != saved.shape() {
+                return false;
+            }
+            compatible.push((tensor, saved));
+        }
+        for (tensor, saved) in compatible {
+            tensor.copy_from_slice(&saved.data());
+        }
+        true
     }
 
     /// Whether early stopping has been triggered.
@@ -173,8 +188,12 @@ impl ModelCheckpoint {
     }
 
     /// Record a new score and save the checkpoint if conditions are met.
-    /// Returns `Ok(true)` if checkpoint was saved to disk.
+    /// Returns `Ok(true)` if checkpoint was saved to disk. Nonfinite scores
+    /// return `InvalidInput`; failed saves leave the recorded best score intact.
     pub fn step(&mut self, score: f32, model: &dyn Module) -> io::Result<bool> {
+        if !score.is_finite() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "checkpoint score must be finite"));
+        }
         let is_improved = match self.best_score {
             None => true,
             Some(best) => match self.mode {
@@ -183,12 +202,11 @@ impl ModelCheckpoint {
             },
         };
 
-        if is_improved {
-            self.best_score = Some(score);
-        }
-
         if !self.save_best_only || is_improved {
             save_state_dict(model, &self.filepath)?;
+            if is_improved {
+                self.best_score = Some(score);
+            }
             Ok(true)
         } else {
             Ok(false)

@@ -534,6 +534,7 @@ impl Tensor {
     pub fn conv2d(&self, weight: &Tensor, stride: usize, padding: usize) -> Tensor {
         assert_same_device(self, weight, "conv2d");
         assert_eq!(self.ndim(), 4, "conv2d input must be [N,C,H,W], got {:?}", self.shape());
+        assert_eq!(weight.ndim(), 4, "conv2d weight must be [O,C,k,k]");
         let (n, c, h, w) = (self.shape()[0], self.shape()[1], self.shape()[2], self.shape()[3]);
         let (o, wc, k, k2) = (weight.shape()[0], weight.shape()[1], weight.shape()[2], weight.shape()[3]);
         assert!(wc == c && k == k2, "conv2d: weight {:?} incompatible with input {:?}", weight.shape(), self.shape());
@@ -572,6 +573,96 @@ impl Tensor {
                 vec![gx, wt.requires_grad().then_some(gw)]
             }),
         )
+    }
+
+    /// Transposed convolution on `[N,C,H,W]` with weights `[C,O,k,k]`.
+    /// Square kernels, unit dilation and one group are supported.
+    pub fn conv_transpose2d(&self, weight: &Tensor, stride: usize, padding: usize, output_padding: usize) -> Tensor {
+        assert_same_device(self, weight, "conv_transpose2d");
+        assert_eq!(self.ndim(), 4, "conv_transpose2d input must be [N,C,H,W]");
+        assert_eq!(weight.ndim(), 4, "conv_transpose2d weight must be [C,O,k,k]");
+        let (n, c, h, w) = (self.shape()[0], self.shape()[1], self.shape()[2], self.shape()[3]);
+        let (wc, o, k, k2) = (weight.shape()[0], weight.shape()[1], weight.shape()[2], weight.shape()[3]);
+        assert!(c > 0 && o > 0 && h > 0 && w > 0 && k > 0 && c == wc && k == k2, "conv_transpose2d: incompatible input/weight shapes");
+        assert!(stride > 0 && output_padding < stride, "conv_transpose2d requires stride > 0 and output_padding < stride");
+        let output_size = |s: usize| {
+            (s - 1).checked_mul(stride)
+                .and_then(|v| v.checked_add(k))
+                .and_then(|v| v.checked_add(output_padding))
+                .and_then(|v| padding.checked_mul(2).and_then(|p| v.checked_sub(p)))
+                .filter(|&v| v > 0)
+                .expect("conv_transpose2d: invalid or overflowing output size")
+        };
+        let (oh, ow) = (output_size(h), output_size(w));
+        let (l, okk) = (h * w, o * k * k);
+        let be = self.backend();
+        let out = with_pair(self, weight, |x, wt| {
+            let wt_t = shape::transpose2d(wt, c, okk);
+            let mut out = vec![0.0; n * o * oh * ow];
+            for b in 0..n {
+                let cols = be.matmul(&wt_t, &x[b * c * l..(b + 1) * c * l], okk, c, l);
+                kernels::col2im(&cols, o, oh, ow, k, stride, padding, &mut out[b * o * oh * ow..(b + 1) * o * oh * ow]);
+            }
+            out
+        });
+        let (x, wt) = (self.clone(), weight.clone());
+        Tensor::from_op(out, vec![n, o, oh, ow], self.device(), vec![self.clone(), weight.clone()], "ConvTranspose2dBackward", Box::new(move |g| {
+            let mut gx = x.requires_grad().then(|| vec![0.0; x.numel()]);
+            let mut gw = wt.requires_grad().then(|| vec![0.0; wt.numel()]);
+            for b in 0..n {
+                let cols = kernels::im2col(&g[b * o * oh * ow..(b + 1) * o * oh * ow], o, oh, ow, k, stride, padding);
+                if let Some(gx) = gx.as_mut() {
+                    let gb = be.matmul(&wt.data(), &cols, c, okk, l);
+                    gx[b * c * l..(b + 1) * c * l].copy_from_slice(&gb);
+                }
+                if let Some(gw) = gw.as_mut() {
+                    let cols_t = shape::transpose2d(&cols, okk, l);
+                    let gb = be.matmul(&x.data()[b * c * l..(b + 1) * c * l], &cols_t, c, l, okk);
+                    gw.iter_mut().zip(gb).for_each(|(a, v)| *a += v);
+                }
+            }
+            vec![gx, gw]
+        }))
+    }
+
+    /// Average pooling on `[N,C,H,W]` to a fixed `(height, width)`.
+    /// Non-divisible input sizes use overlapping floor/ceil pooling regions.
+    pub fn adaptive_avg_pool2d(&self, output_size: (usize, usize)) -> Tensor {
+        assert_eq!(self.ndim(), 4, "adaptive_avg_pool2d input must be [N,C,H,W]");
+        let (n, c, h, w) = (self.shape()[0], self.shape()[1], self.shape()[2], self.shape()[3]);
+        let (oh, ow) = output_size;
+        assert!(h > 0 && w > 0 && oh > 0 && ow > 0, "adaptive_avg_pool2d spatial sizes must be positive");
+        let regions: Vec<_> = (0..oh).flat_map(|y| (0..ow).map(move |x| {
+            (y * h / oh, ((y + 1) * h).div_ceil(oh), x * w / ow, ((x + 1) * w).div_ceil(ow))
+        })).collect();
+        let mut out = Vec::with_capacity(n * c * oh * ow);
+        let d = self.data();
+        for plane in 0..n * c {
+            for &(y0, y1, x0, x1) in &regions {
+                let mut sum = 0.0;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        sum += d[(plane * h + y) * w + x];
+                    }
+                }
+                out.push(sum / ((y1 - y0) * (x1 - x0)) as f32);
+            }
+        }
+        let numel = self.numel();
+        Tensor::from_op(out, vec![n, c, oh, ow], self.device(), vec![self.clone()], "AdaptiveAvgPool2dBackward", Box::new(move |g| {
+            let mut gx = vec![0.0; numel];
+            for plane in 0..n * c {
+                for (i, &(y0, y1, x0, x1)) in regions.iter().enumerate() {
+                    let value = g[plane * oh * ow + i] / ((y1 - y0) * (x1 - x0)) as f32;
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            gx[(plane * h + y) * w + x] += value;
+                        }
+                    }
+                }
+            }
+            vec![Some(gx)]
+        }))
     }
 
     /// 2-D max pooling on `[N,C,H,W]`.
