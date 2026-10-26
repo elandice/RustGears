@@ -1,6 +1,6 @@
-# RusTorch — Rust 기반 PyTorch / TensorFlow 스타일 딥러닝 프레임워크
+# RustGears — Rust 기반 PyTorch / TensorFlow 스타일 딥러닝 프레임워크
 
-**RusTorch**는 순수 Rust로 구현된 머신러닝 및 딥러닝 라이브러리입니다. PyTorch의 직관적인 동적 자동 미분(`Autograd`) 및 모듈(`nn::Module`) API와, TensorFlow / ONNX Runtime 스타일의 그래프 최적화 및 하드웨어 실행 프로바이더(`CPU` / `GPU` / `NPU`)를 결합했습니다.
+**RustGears**는 순수 Rust로 구현된 머신러닝 및 딥러닝 라이브러리입니다. PyTorch의 직관적인 동적 자동 미분(`Autograd`) 및 모듈(`nn::Module`) API와, TensorFlow / ONNX Runtime 스타일의 그래프 최적화 및 하드웨어 실행 프로바이더(`CPU` / `GPU` / `NPU`)를 결합했습니다.
 
 ---
 
@@ -26,7 +26,7 @@
 
 ```mermaid
 flowchart TB
-    subgraph UserAPI["User API (rustorch::prelude::*)"]
+    subgraph UserAPI["User API (RustGears::prelude::*)"]
         T["Tensor & Autograd"]
         NN["nn::Module / Sequential\n(Linear, Conv2d, BN, Transformer)"]
         OPT["optim::Optimizer & LrScheduler\n(SGD, Adam, AdamW, RMSprop)"]
@@ -94,7 +94,7 @@ cargo run --example modern_features --no-default-features
 ### 2. 기본 학습 + NPU 추론 코드
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 fn main() -> Result<(), String> {
     manual_seed(42);

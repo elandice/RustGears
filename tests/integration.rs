@@ -2,7 +2,7 @@
 //! (Ring All-Reduce), NPU inference (operator fusion + INT8/FP16), and model
 //! serialisation.
 
-use rustorch::prelude::*;
+use rustgears::prelude::*;
 
 fn assert_close(a: &[f32], b: &[f32], tol: f32) {
     assert_eq!(a.len(), b.len(), "length mismatch: {} vs {}", a.len(), b.len());
@@ -52,7 +52,7 @@ fn autograd_numerical_gradient_check() {
 fn gpu_and_cpu_matmul_and_unary_match() {
     manual_seed(123);
     // Force even small workloads onto the physical GPU if one is present
-    rustorch::device::gpu::set_offload_threshold(0, 0);
+    rustgears::device::gpu::set_offload_threshold(0, 0);
 
     let a_cpu = Tensor::randn(&[17, 19]).requires_grad_(true);
     let b_cpu = Tensor::randn(&[19, 13]).requires_grad_(true);
@@ -183,7 +183,7 @@ fn transformer_and_checkpoint_roundtrip() {
     let probe = Tensor::randn(&[3, 4]);
     let before = net.forward(&probe).to_vec();
 
-    let tmp = std::env::temp_dir().join("rustorch_test_ckpt.rtsc");
+    let tmp = std::env::temp_dir().join("rustgears_test_ckpt.rtsc");
     save_state_dict(&net, &tmp).unwrap();
 
     let net2 = Sequential::new().add(Linear::new(4, 8)).add(Relu).add(Linear::new(8, 2));

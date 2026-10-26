@@ -1,5 +1,5 @@
 [package]
-name = "rustorch"
+name = "rustgears"
 version = "0.1.0"
 edition = "2021"
 description = "A PyTorch/TensorFlow-style machine learning library written in Rust (autograd, nn, optim, GPU via wgpu, data-parallel, NPU inference)"

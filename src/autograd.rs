@@ -38,7 +38,7 @@ pub fn set_grad_enabled(enabled: bool) {
 /// The guard stays on its creating thread because it restores thread-local state.
 ///
 /// ```compile_fail
-/// let guard = rustorch::autograd::NoGradGuard::new();
+/// let guard = rustgears::autograd::NoGradGuard::new();
 /// std::thread::spawn(move || drop(guard));
 /// ```
 pub struct NoGradGuard {

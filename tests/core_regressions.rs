@@ -1,5 +1,5 @@
-use rustorch::autograd::is_grad_enabled;
-use rustorch::prelude::*;
+use rustgears::autograd::is_grad_enabled;
+use rustgears::prelude::*;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 fn rejects(f: impl FnOnce()) {

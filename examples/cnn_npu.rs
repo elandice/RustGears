@@ -7,11 +7,11 @@
 //! cargo run --example cnn_npu
 //! ```
 
-use rustorch::data::datasets;
-use rustorch::prelude::*;
+use rustgears::data::datasets;
+use rustgears::prelude::*;
 
 fn main() {
-    println!("=== RusTorch CNN Training + NPU INT8 Deployment ===");
+    println!("=== RustGears CNN Training + NPU INT8 Deployment ===");
     manual_seed(7);
 
     let device = Device::best_available();

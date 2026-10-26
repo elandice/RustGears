@@ -1,4 +1,4 @@
-//! # RusTorch
+//! # RustGears
 //!
 //! A PyTorch / TensorFlow inspired deep-learning library written in pure Rust.
 //!
@@ -22,7 +22,7 @@ pub mod rng;
 pub mod save;
 pub mod tensor;
 
-/// Convenient glob import (`use rustorch::prelude::*;`).
+/// Convenient glob import (`use rustgears::prelude::*;`).
 pub mod prelude {
     pub use crate::autograd::{no_grad, NoGradGuard};
     pub use crate::data::{DataLoader, Dataset, PrefetchIter, TensorDataset};

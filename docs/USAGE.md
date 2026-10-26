@@ -1,6 +1,6 @@
-# RusTorch 상세 사용 가이드 및 아키텍처 문서
+# RustGears 상세 사용 가이드 및 아키텍처 문서
 
-이 문서는 **RusTorch**의 내부 동작 원리와 API 사용법을 **Mermaid 다이어그램**과 함께 상세히 설명합니다.
+이 문서는 **RustGears**의 내부 동작 원리와 API 사용법을 **Mermaid 다이어그램**과 함께 상세히 설명합니다.
 
 ---
 
@@ -20,7 +20,7 @@
 
 ```mermaid
 graph LR
-    LIB["rustorch (src/lib.rs)"] --> TENSOR["tensor\n다차원 텐서, 브로드캐스팅, 연산"]
+    LIB["RustGears (src/lib.rs)"] --> TENSOR["tensor\n다차원 텐서, 브로드캐스팅, 연산"]
     LIB --> AUTO["autograd\n역전파 그래프 & no_grad"]
     LIB --> DEV["device\nCPU (rayon) & GPU (wgpu WGSL)"]
     LIB --> NN["nn\nLinear, Conv2d, BN, LN,\nDropout, Attention, Loss"]
@@ -62,7 +62,7 @@ flowchart LR
 ### 2.2 텐서 생성 및 연산 사용법
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 // 1. 텐서 생성
 let a = Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).requires_grad_(true);
@@ -109,7 +109,7 @@ flowchart TD
 ### 3.2 장치 지정 코드 예제
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 // 시스템의 모든 학습 장치 출력
 for info in list_devices() {
@@ -128,7 +128,7 @@ let model = Sequential::new()
 model.to(dev);
 
 // 강제로 모든 크기의 연산을 GPU 셰이더에서 실행하려면 임계값을 0으로 설정
-rustorch::device::gpu::set_offload_threshold(0, 0);
+RustGears::device::gpu::set_offload_threshold(0, 0);
 
 let out = model.forward(&x);
 assert_eq!(out.device(), dev);
@@ -143,7 +143,7 @@ assert_eq!(out.device(), dev);
 `Sequential`로 레이어를 간편하게 쌓거나, `Module` 트레이트를 구현하여 임의의 분기/잔차(Residual) 구조를 만들 수 있습니다.
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 // 1) Sequential 빌더 패턴
 let cnn = Sequential::new()
@@ -169,7 +169,7 @@ let encoder = TransformerEncoderLayer::new(
 ### 4.2 옵티마이저, 그래디언트 클리핑, 학습률 스케줄러 & 얼리스탑 콜백
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 let model = Sequential::new().add(Linear::new(10, 32)).add(Relu).add(Linear::new(32, 2));
 let mut opt = AdamW::new(model.parameters(), /* lr */ 1e-3, /* weight_decay */ 1e-2);
@@ -275,7 +275,7 @@ sequenceDiagram
 ### 5.2 `DataParallel` 사용 코드
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 let devices = vec![Device::Gpu(0), Device::Gpu(1), Device::Gpu(2), Device::Gpu(3)];
 
@@ -347,7 +347,7 @@ flowchart LR
 ### 6.2 NPU 추론 및 텔레메트리(`NpuProfile`) 확인
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 let model = Sequential::new()
     .add(Linear::new(16, 64))
@@ -384,13 +384,13 @@ NPU Profile [INT8 | layers: 4 -> 2 fused | weights: 5392 B -> 1552 B (3.47x) | M
 
 ## 7. 모델 저장 및 배포 (`.rtsc` / `.rtim`)
 
-RusTorch는 두 가지 바이너리 포맷을 제공합니다.
+RustGears는 두 가지 바이너리 포맷을 제공합니다.
 
 1. **`RTSC` (`save_state_dict` / `load_state_dict`)**: PyTorch의 `state_dict`처럼 파라미터 및 BatchNorm 러닝 통계(`named_buffers`)를 이름별로 저장하고 복원합니다(재학습/체크포인트용).
 2. **`RTIM` (`save_inference_model` / `load_inference_layers`)**: 모델 구조와 가중치를 함께 직렬화하여, 원본 Rust 모델 타입 정의 없이도 `InferenceSession`에서 즉시 로드해 **NPU / GPU / CPU**에서 실행할 수 있는 배포용 포맷입니다.
 
 ```rust
-use rustorch::prelude::*;
+use RustGears::prelude::*;
 
 let model = Sequential::new()
     .add(Linear::new(4, 16))

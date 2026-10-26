@@ -1,5 +1,5 @@
-use rustorch::nn::layers::{AdaptiveAvgPool2d, ConvTranspose2d};
-use rustorch::prelude::*;
+use rustgears::nn::layers::{AdaptiveAvgPool2d, ConvTranspose2d};
+use rustgears::prelude::*;
 
 fn close(a: &[f32], b: &[f32], tolerance: f32) {
     assert_eq!(a.len(), b.len());

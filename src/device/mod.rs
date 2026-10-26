@@ -1,10 +1,10 @@
 //! Device selection: decide *where* tensors are computed.
 //!
 //! ```no_run
-//! use rustorch::prelude::*;
+//! use rustgears::prelude::*;
 //! let dev = Device::best_available();      // gpu:0 if a GPU exists, otherwise cpu
 //! let dev = Device::parse("gpu:1").unwrap(); // explicit selection
-//! for info in rustorch::device::list_devices() { println!("{info}"); }
+//! for info in rustgears::device::list_devices() { println!("{info}"); }
 //! ```
 
 pub mod backend;

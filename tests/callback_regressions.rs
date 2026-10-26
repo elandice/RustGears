@@ -1,4 +1,4 @@
-use rustorch::prelude::*;
+use rustgears::prelude::*;
 use std::io::ErrorKind;
 
 struct State(Vec<(String, Tensor)>);
@@ -16,7 +16,7 @@ impl Module for State {
 #[test]
 fn checkpoint_retries_after_failed_save_and_rejects_nonfinite_scores() {
     let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let directory = std::env::temp_dir().join(format!("rustorch_callback_{}_{}", std::process::id(), unique));
+    let directory = std::env::temp_dir().join(format!("rustgears_callback_{}_{}", std::process::id(), unique));
     let path = directory.join("model.rtsc");
     let model = State(vec![("weight".into(), Tensor::ones(&[2]))]);
     let mut checkpoint = ModelCheckpoint::new(&path);

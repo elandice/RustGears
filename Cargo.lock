@@ -806,6 +806,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
+name = "rustgears"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster",
+ "rayon",
+ "safetensors",
+ "tempfile",
+ "wgpu",
+]
+
+[[package]]
 name = "rustix"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -816,18 +828,6 @@ dependencies = [
  "libc",
  "linux-raw-sys",
  "windows-sys",
-]
-
-[[package]]
-name = "rustorch"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "pollster",
- "rayon",
- "safetensors",
- "tempfile",
- "wgpu",
 ]
 
 [[package]]

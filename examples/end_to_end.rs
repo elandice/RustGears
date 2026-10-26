@@ -1,4 +1,4 @@
-//! End-to-end showcase of RusTorch:
+//! End-to-end showcase of RustGears:
 //! 1. Hardware discovery & device selection (`CPU`, `GPU:0`, ...)
 //! 2. Multi-GPU Data-Parallel training (`DataParallel` + `ring_all_reduce`)
 //! 3. Checkpointing & portable model export (`.rtim`)
@@ -10,8 +10,8 @@
 //! cargo run --example end_to_end
 //! ```
 
-use rustorch::data::datasets;
-use rustorch::prelude::*;
+use rustgears::data::datasets;
+use rustgears::prelude::*;
 
 fn build_mlp() -> Sequential {
     Sequential::new()
@@ -26,7 +26,7 @@ fn build_mlp() -> Sequential {
 
 fn main() {
     println!("======================================================================");
-    println!("  RusTorch - End-to-End Deep Learning Pipeline (CPU / GPU / NPU)");
+    println!("  RustGears - End-to-End Deep Learning Pipeline (CPU / GPU / NPU)");
     println!("======================================================================\n");
 
     // ------------------------------------------------------------------

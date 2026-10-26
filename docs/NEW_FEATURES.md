@@ -1,6 +1,6 @@
 # 추가 기능과 점검 결과
 
-다섯 기능은 모두 `use rustorch::prelude::*;`로 사용할 수 있습니다. 실행 가능한 전체 예제는 [modern_features.rs](../examples/modern_features.rs)입니다.
+다섯 기능은 모두 `use RustGears::prelude::*;`로 사용할 수 있습니다. 실행 가능한 전체 예제는 [modern_features.rs](../examples/modern_features.rs)입니다.
 
 ```sh
 cargo run --example modern_features --no-default-features
@@ -20,7 +20,7 @@ load_state_dict(&model, "model.safetensors")?;
 
 이름과 shape가 일치해야 하며, 모델의 모든 상태를 검증한 후 반영합니다. 파일에만 있는 추가 키는 무시합니다. `read_safetensors(path)`는 이름별 CPU 텐서를 반환해 외부 가중치를 직접 매핑할 수 있습니다.
 
-예를 들어 PyTorch/Hugging Face Linear의 `[out, in]` 가중치는 RusTorch의 `[in, out]`에 맞춰 전치해야 합니다. 이름이 같은 정사각 가중치도 레이아웃 확인이 필요합니다.
+예를 들어 PyTorch/Hugging Face Linear의 `[out, in]` 가중치는 RustGears의 `[in, out]`에 맞춰 전치해야 합니다. 이름이 같은 정사각 가중치도 레이아웃 확인이 필요합니다.
 
 ```rust
 let weights = read_safetensors("model.safetensors")?;

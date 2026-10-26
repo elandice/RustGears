@@ -120,7 +120,7 @@ pub fn discover() -> Vec<GpuContext> {
         let limits = adapter.limits();
         let res = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("rustorch-device"),
+                label: Some("rustgears-device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: limits,
             },
@@ -129,7 +129,7 @@ pub fn discover() -> Vec<GpuContext> {
         let (device, queue) = match res {
             Ok(dq) => dq,
             Err(e) => {
-                eprintln!("[rustorch] failed to open GPU '{}': {e}", info.name);
+                eprintln!("[rustgears] failed to open GPU '{}': {e}", info.name);
                 continue;
             }
         };

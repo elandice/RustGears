@@ -1,4 +1,4 @@
-use rustorch::prelude::*;
+use rustgears::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn batches(loader: &mut DataLoader<'_>) -> Vec<(Vec<f32>, Vec<f32>)> {

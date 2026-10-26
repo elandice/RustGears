@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{io, path::Path};
 
 /// Save parameters and buffers as interoperable `F32` Safetensors tensors.
-/// Tensor names and layouts are preserved, including RusTorch's `[in, out]`
+/// Tensor names and layouts are preserved, including RustGears's `[in, out]`
 /// Linear weights; PyTorch Linear weights use `[out, in]` instead.
 pub fn save_safetensors(module: &dyn Module, path: impl AsRef<Path>) -> io::Result<()> {
     let mut owned = BTreeMap::new();
@@ -33,7 +33,7 @@ pub fn save_safetensors(module: &dyn Module, path: impl AsRef<Path>) -> io::Resu
 /// Read named `F32`, `F16`, or `BF16` weights into CPU `f32` tensors.
 ///
 /// Use this to map external parameter names and transpose external Linear
-/// weights before copying them into a RusTorch model. Unsupported dtypes are
+/// weights before copying them into a RustGears model. Unsupported dtypes are
 /// reported as errors; no integer or quantized weights are silently cast.
 pub fn read_safetensors(path: impl AsRef<Path>) -> io::Result<HashMap<String, Tensor>> {
     let bytes = std::fs::read(path)?;
@@ -101,7 +101,7 @@ mod tests {
     fn path(extension: &str) -> std::path::PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         std::env::temp_dir().join(format!(
-            "rustorch_safetensors_{}_{}.{}",
+            "rustgears_safetensors_{}_{}.{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),
             extension

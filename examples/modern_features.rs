@@ -1,5 +1,5 @@
 //! Run with `cargo run --example modern_features --no-default-features`.
-use rustorch::prelude::*;
+use rustgears::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     manual_seed(42);
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ema.copy_to(&evaluation)?;
     evaluation.eval();
 
-    let path = std::env::temp_dir().join(format!("rustorch_modern_{}.safetensors", std::process::id()));
+    let path = std::env::temp_dir().join(format!("rustgears_modern_{}.safetensors", std::process::id()));
     save_safetensors(&evaluation, &path)?;
     let restored = build();
     load_safetensors(&restored, &path)?;

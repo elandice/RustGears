@@ -6,8 +6,8 @@
 //! cargo run --example transformer
 //! ```
 
-use rustorch::data::datasets;
-use rustorch::prelude::*;
+use rustgears::data::datasets;
+use rustgears::prelude::*;
 
 struct SortTransformer {
     tok_emb: Embedding,
@@ -40,17 +40,17 @@ impl Module for SortTransformer {
     }
 
     fn named_parameters(&self) -> Vec<(String, Tensor)> {
-        let mut v = rustorch::nn::prefixed("tok_emb", self.tok_emb.named_parameters());
-        v.extend(rustorch::nn::prefixed("pos_emb", self.pos_emb.named_parameters()));
-        v.extend(rustorch::nn::prefixed("block", self.block.named_parameters()));
-        v.extend(rustorch::nn::prefixed("ln", self.ln.named_parameters()));
-        v.extend(rustorch::nn::prefixed("head", self.head.named_parameters()));
+        let mut v = rustgears::nn::prefixed("tok_emb", self.tok_emb.named_parameters());
+        v.extend(rustgears::nn::prefixed("pos_emb", self.pos_emb.named_parameters()));
+        v.extend(rustgears::nn::prefixed("block", self.block.named_parameters()));
+        v.extend(rustgears::nn::prefixed("ln", self.ln.named_parameters()));
+        v.extend(rustgears::nn::prefixed("head", self.head.named_parameters()));
         v
     }
 }
 
 fn main() {
-    println!("=== RusTorch Transformer Sequence-Sorting Demo ===");
+    println!("=== RustGears Transformer Sequence-Sorting Demo ===");
     manual_seed(10);
 
     let (vocab, seq_len) = (8, 5);

@@ -48,7 +48,7 @@ pub struct GpuAdapterInfo {
 fn contexts() -> &'static Vec<Arc<wgpu_impl::GpuContext>> {
     static CTX: OnceLock<Vec<Arc<wgpu_impl::GpuContext>>> = OnceLock::new();
     CTX.get_or_init(|| {
-        if std::env::var("RUSTORCH_DISABLE_GPU").map(|v| v == "1").unwrap_or(false) {
+        if std::env::var("RUSTGEARS_DISABLE_GPU").or_else(|_| std::env::var("RUSTORCH_DISABLE_GPU")).map(|v| v == "1").unwrap_or(false) {
             return Vec::new();
         }
         wgpu_impl::discover().into_iter().map(Arc::new).collect()
@@ -158,7 +158,7 @@ pub fn backend(index: usize) -> Arc<GpuBackend> {
             };
             if !be.is_physical() {
                 eprintln!(
-                    "[rustorch] gpu:{index} is not a physical GPU ({} found) -> using a CPU-emulated virtual GPU",
+                    "[rustgears] gpu:{index} is not a physical GPU ({} found) -> using a CPU-emulated virtual GPU",
                     physical_count()
                 );
             }
