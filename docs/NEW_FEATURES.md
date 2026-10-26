@@ -66,7 +66,7 @@ std::thread::scope(|scope| {
 });
 ```
 
-`iter()`는 기존 동기 동작을 유지합니다. `iter_prefetch(scope, capacity)`는 별도 producer 스레드와 Rayon 샘플 병렬화를 사용하며, 최대 `capacity`개 완성 배치를 큐에 둡니다. producer가 준비 중인 한 배치와 소비 중인 배치는 별도입니다. shuffle·drop_last·device와 배치 순서는 동기 로더와 같습니다.
+`iter()`는 동기 로더이고 `iter_prefetch(scope, capacity)`는 별도 producer 스레드를 사용합니다. `TensorDataset`은 배치를 일괄 읽어 샘플별 임시 버퍼를 생략하며, 일반 Dataset은 Rayon 샘플 병렬화를 사용합니다. 최대 `capacity`개 완성 배치를 큐에 두고 producer가 준비 중인 한 배치와 소비 중인 배치는 별도입니다. shuffle·drop_last·device와 배치 순서는 동기 로더와 같습니다. [미니배치 성능 분석과 측정 결과](MINIBATCH_PERFORMANCE.md)에서 경로별 개선 폭과 사용 시 판단 기준을 설명합니다.
 
 borrowed Dataset을 안전하게 유지하기 위해 표준 scoped thread 안에서 사용합니다. 조기 중단 시 큐를 닫고 producer를 join하며, Dataset의 panic을 소비자에 전달합니다. Rayon 작업 내부에서 소비할 때는 스레드 풀 교착을 피하도록 producer의 샘플 읽기를 순차 실행합니다. 실제 CPU/GPU 전송 중첩이나 GPU 처리량 향상은 별도 하드웨어 측정이 필요합니다.
 

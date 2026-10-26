@@ -141,5 +141,6 @@ fn main() -> Result<(), String> {
 
 ## 상세 문서
 
+- 미니배치 로딩·slicing·병렬 학습의 성능 개선과 재현 가능한 측정 결과는 **[docs/MINIBATCH_PERFORMANCE.md](docs/MINIBATCH_PERFORMANCE.md)** 에 정리되어 있습니다.
 - 추가된 다섯 기능의 API, 지원 범위와 분석·보완 결과는 **[docs/NEW_FEATURES.md](docs/NEW_FEATURES.md)** 에 정리되어 있습니다.
 - 전체 API 레퍼런스, 아키텍처 다이어그램(Autograd 역전파, WGSL GPU 타일링, Ring All-Reduce, NPU 연산자 퓨전 & INT8 양자화 파이프라인), 단계별 사용 가이드는 **[docs/USAGE.md](docs/USAGE.md)** 에 정리되어 있습니다.

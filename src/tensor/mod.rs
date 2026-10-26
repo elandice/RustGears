@@ -62,10 +62,13 @@ impl Tensor {
     pub fn from_rows(rows: &[Vec<f32>]) -> Tensor {
         let r = rows.len();
         let c = rows.first().map(|x| x.len()).unwrap_or(0);
-        let data: Vec<f32> = rows.iter().flat_map(|row| {
-            assert_eq!(row.len(), c, "ragged rows");
-            row.iter().copied()
-        }).collect();
+        let data: Vec<f32> = rows
+            .iter()
+            .flat_map(|row| {
+                assert_eq!(row.len(), c, "ragged rows");
+                row.iter().copied()
+            })
+            .collect();
         Self::from_vec(data, &[r, c])
     }
 
@@ -292,7 +295,10 @@ impl Tensor {
     /// Back-propagate from this (scalar) tensor.
     pub fn backward(&self) {
         assert_eq!(self.numel(), 1, "backward() without arguments requires a scalar output (got {:?})", self.shape());
-        assert!(self.requires_grad(), "backward(): tensor does not require grad (no trainable inputs or no_grad active)");
+        assert!(
+            self.requires_grad(),
+            "backward(): tensor does not require grad (no trainable inputs or no_grad active)"
+        );
         autograd::run_backward(self, vec![1.0]);
     }
 
@@ -329,8 +335,14 @@ impl Tensor {
 
     /// Contiguous slice `[start, start+len)` along dim 0 – non differentiable.
     pub fn narrow_rows(&self, start: usize, len: usize) -> Tensor {
-        let idx: Vec<usize> = (start..start + len).collect();
-        self.index_rows(&idx)
+        assert!(self.ndim() > 0, "narrow_rows requires a batch dimension");
+        let rows = self.shape()[0];
+        assert!(start <= rows && len <= rows - start, "narrow_rows range exceeds the batch dimension");
+        let row = self.numel() / rows.max(1);
+        let data = self.data()[start * row..(start + len) * row].to_vec();
+        let mut shape = self.shape().to_vec();
+        shape[0] = len;
+        Self::build(data, shape, self.device(), false, None)
     }
 
     /// Index of the maximum along the last dimension.

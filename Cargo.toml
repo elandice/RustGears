@@ -28,3 +28,7 @@ opt-level = 2
 [profile.release]
 debug = false
 lto = "thin"
+
+[[bench]]
+name = "minibatch"
+harness = false

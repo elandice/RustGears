@@ -19,6 +19,13 @@ pub trait Dataset: Send + Sync {
     /// Shape of one target sample (`[]` for class indices).
     fn target_shape(&self) -> Vec<usize>;
 
+    /// Optional bulk read of flattened inputs and targets in `indices` order.
+    /// Return `None` to use parallel per-sample reads. Implementations must
+    /// preserve each sample's declared shape; the loader checks batch lengths.
+    fn get_batch(&self, _indices: &[usize]) -> Option<(Vec<f32>, Vec<f32>)> {
+        None
+    }
+
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -93,10 +100,31 @@ impl Dataset for TensorDataset {
     fn target_shape(&self) -> Vec<usize> {
         self.y_shape.clone()
     }
+
+    fn get_batch(&self, indices: &[usize]) -> Option<(Vec<f32>, Vec<f32>)> {
+        assert!(indices.iter().all(|&i| i < self.n), "TensorDataset: sample index out of range");
+        if indices.is_empty() {
+            return Some((Vec::new(), Vec::new()));
+        }
+        let xs: usize = self.x_shape.iter().product();
+        let ys: usize = self.y_shape.iter().product();
+        if indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
+            let start = indices[0];
+            let end = start + indices.len();
+            return Some((self.x[start * xs..end * xs].to_vec(), self.y[start * ys..end * ys].to_vec()));
+        }
+        let mut x = Vec::with_capacity(indices.len() * xs);
+        let mut y = Vec::with_capacity(indices.len() * ys);
+        for &i in indices {
+            x.extend_from_slice(&self.x[i * xs..(i + 1) * xs]);
+            y.extend_from_slice(&self.y[i * ys..(i + 1) * ys]);
+        }
+        Some((x, y))
+    }
 }
 
-/// Iterates a dataset in (optionally shuffled) mini-batches. Samples of a
-/// batch are gathered in parallel on the rayon thread pool.
+/// Iterates a dataset in (optionally shuffled) mini-batches. Uses bulk reads
+/// when available, otherwise gathers samples on the Rayon thread pool.
 pub struct DataLoader<'a> {
     dataset: &'a dyn Dataset,
     batch_size: usize,
@@ -161,21 +189,30 @@ impl<'a> DataLoader<'a> {
         let n = order.len();
         (0..n).step_by(bs).filter(move |&start| !drop_last || n - start >= bs).map(move |start| {
             let idx = &order[start..start + bs.min(n - start)];
-            let samples: Vec<(Vec<f32>, Vec<f32>)> = if parallel_samples {
-                idx.par_iter().map(|&i| ds.get(i)).collect()
-            } else {
-                idx.iter().map(|&i| ds.get(i)).collect()
-            };
-            let mut x = Vec::new();
-            let mut y = Vec::new();
             let xn: usize = xs.iter().product();
             let yn: usize = ys.iter().product();
-            for (a, b) in samples {
-                assert_eq!(a.len(), xn, "Dataset::get returned the wrong input size");
-                assert_eq!(b.len(), yn, "Dataset::get returned the wrong target size");
-                x.extend(a);
-                y.extend(b);
-            }
+            let (x, y) = if let Some(batch) = ds.get_batch(idx) {
+                batch
+            } else {
+                let samples: Vec<(Vec<f32>, Vec<f32>)> = if parallel_samples {
+                    idx.par_iter().map(|&i| ds.get(i)).collect()
+                } else {
+                    idx.iter().map(|&i| ds.get(i)).collect()
+                };
+                for (a, b) in &samples {
+                    assert_eq!(a.len(), xn, "Dataset::get returned the wrong input size");
+                    assert_eq!(b.len(), yn, "Dataset::get returned the wrong target size");
+                }
+                let mut x = Vec::with_capacity(idx.len() * xn);
+                let mut y = Vec::with_capacity(idx.len() * yn);
+                for (a, b) in samples {
+                    x.extend(a);
+                    y.extend(b);
+                }
+                (x, y)
+            };
+            assert_eq!(x.len(), idx.len() * xn, "Dataset::get_batch returned the wrong input batch size");
+            assert_eq!(y.len(), idx.len() * yn, "Dataset::get_batch returned the wrong target batch size");
             let mut xshape = vec![idx.len()];
             xshape.extend(&xs);
             let mut yshape = vec![idx.len()];

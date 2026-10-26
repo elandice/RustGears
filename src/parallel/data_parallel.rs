@@ -29,7 +29,7 @@ pub struct StepReport {
 /// Replicates a model on several devices and trains it data-parallel:
 ///
 /// 1. **scatter** the mini-batch into one shard per device,
-/// 2. run **forward + backward concurrently** (one OS thread per replica),
+/// 2. run **forward + backward concurrently** on active replicas (one device runs inline),
 /// 3. average the gradients with a **ring all-reduce**,
 /// 4. the optimizer updates the master replica, then parameters are
 ///    **broadcast** back to all replicas.
@@ -105,11 +105,45 @@ impl<M: Module> DataParallel<M> {
         assert!(n > 0, "DataParallel batch must not be empty");
         assert_eq!(y.shape()[0], n, "DataParallel input and target batch sizes must match");
         let k = self.devices.len();
+
+        let compute = |rep: &M, dev: Device, start: usize, len: usize| {
+            let t0 = Instant::now();
+            rep.zero_grad();
+            let xs = x.narrow_rows(start, len).on(dev);
+            let ys = y.narrow_rows(start, len).on(dev);
+            let out = rep.forward(&xs);
+            let loss = loss_fn(&out, &ys);
+            loss.backward();
+            ReplicaStats { device: dev, samples: len, loss: loss.item(), compute_time: t0.elapsed() }
+        };
+
+        // Worker threads have gradient recording enabled independently of the caller.
+        if k == 1 && crate::autograd::is_grad_enabled() {
+            let replica = compute(&self.replicas[0], self.devices[0], 0, n);
+            let t0 = Instant::now();
+            let params = self.replicas[0].parameters();
+            let elements = params.iter().map(Tensor::numel).sum();
+            for p in params {
+                let mut present = false;
+                p.with_grad_mut(|_| present = true);
+                if !present {
+                    p.set_grad(Some(vec![0.0; p.numel()]));
+                }
+            }
+            return StepReport {
+                loss: replica.loss,
+                replicas: vec![replica],
+                allreduce: AllReduceStats { workers: 1, elements, steps: 0, bytes_sent: 0 },
+                allreduce_time: t0.elapsed(),
+            };
+        }
+
         // shard sizes (as even as possible)
         let (base, extra) = (n / k, n % k);
-        let shards: Vec<(usize, usize)> = (0..k).map(|r| (r * base + r.min(extra), base + usize::from(r < extra))).collect();
+        let shards: Vec<(usize, usize)> =
+            (0..k).map(|r| (r * base + r.min(extra), base + usize::from(r < extra))).collect();
 
-        let loss_fn = &loss_fn;
+        let compute = &compute;
         let replicas: Vec<ReplicaStats> = std::thread::scope(|s| {
             let handles: Vec<_> = self
                 .replicas
@@ -117,22 +151,24 @@ impl<M: Module> DataParallel<M> {
                 .zip(&self.devices)
                 .zip(&shards)
                 .map(|((rep, &dev), &(start, len))| {
-                    s.spawn(move || {
-                        let t0 = Instant::now();
+                    if len == 0 {
                         rep.zero_grad();
-                        if len == 0 {
-                            return ReplicaStats { device: dev, samples: 0, loss: 0.0, compute_time: t0.elapsed() };
-                        }
-                        let xs = x.narrow_rows(start, len).on(dev);
-                        let ys = y.narrow_rows(start, len).on(dev);
-                        let out = rep.forward(&xs);
-                        let loss = loss_fn(&out, &ys);
-                        loss.backward();
-                        ReplicaStats { device: dev, samples: len, loss: loss.item(), compute_time: t0.elapsed() }
-                    })
+                        None
+                    } else {
+                        Some(s.spawn(move || compute(rep, dev, start, len)))
+                    }
                 })
                 .collect();
-            handles.into_iter().map(|h| h.join().expect("replica thread panicked")).collect()
+            handles
+                .into_iter()
+                .zip(&self.devices)
+                .map(|(handle, &device)| {
+                    handle.map_or_else(
+                        || ReplicaStats { device, samples: 0, loss: 0.0, compute_time: Duration::ZERO },
+                        |handle| handle.join().expect("replica thread panicked"),
+                    )
+                })
+                .collect()
         });
 
         // flatten each replica's gradients into one bucket, pre-scaled by its share of the batch
@@ -143,12 +179,16 @@ impl<M: Module> DataParallel<M> {
             .zip(&replicas)
             .map(|(ps, st)| {
                 let w = st.samples as f32 / n as f32;
-                let mut b = Vec::new();
+                let mut b = vec![0.0; ps.iter().map(Tensor::numel).sum()];
+                let mut offset = 0;
                 for p in ps {
-                    match p.grad_vec() {
-                        Some(g) => b.extend(g.iter().map(|v| v * w)),
-                        None => b.extend(std::iter::repeat_n(0.0, p.numel())),
-                    }
+                    let end = offset + p.numel();
+                    p.with_grad_mut(|g| {
+                        for (dst, &src) in b[offset..end].iter_mut().zip(g.iter()) {
+                            *dst = src * w;
+                        }
+                    });
+                    offset = end;
                 }
                 b
             })
