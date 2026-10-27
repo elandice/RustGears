@@ -1,8 +1,11 @@
 //! Differentiable tensor operations.
 
 use super::{shape, Tensor};
-use crate::device::{BinaryOp, UnaryOp};
+use crate::autograd;
+use crate::device::cpu::{cpu_matmul_into, cpu_matmul_nt_add_into, cpu_matmul_serial};
+use crate::device::{BinaryOp, Device, UnaryOp};
 use crate::kernels;
+use rayon::prelude::*;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 fn assert_same_device(a: &Tensor, b: &Tensor, op: &str) {
@@ -41,9 +44,21 @@ fn unary_name(op: UnaryOp) -> &'static str {
     }
 }
 
+/// Fast broadcast patterns that avoid allocating `Vec<usize>` index maps.
+enum BroadcastKind {
+    /// Identical shapes (`a.shape() == b.shape()`).
+    Same,
+    /// `b` has shape `[D]` or `[1, .., 1, D]` broadcast over `a` of shape `[.., D]` (`outer = a.len() / D`).
+    LastDimB { outer: usize, d: usize },
+    /// `b` has shape `[1, C, 1, 1]` broadcast over `a` of shape `[N, C, H, W]`.
+    Channel4dB { n: usize, c: usize, spatial: usize },
+    /// General NumPy broadcast fallback with precomputed index maps.
+    General(Vec<usize>, Vec<usize>),
+}
+
 impl Tensor {
     // ------------------------------------------------------------------
-    // element-wise binary (with broadcasting)
+    // element-wise binary (with fast-path broadcasting)
     // ------------------------------------------------------------------
 
     fn binary(&self, other: &Tensor, op: BinaryOp) -> Tensor {
@@ -52,16 +67,62 @@ impl Tensor {
         let b_shape = other.shape().to_vec();
         let out_shape = shape::broadcast_shape(&a_shape, &b_shape).unwrap_or_else(|e| panic!("{op:?}: {e}"));
         let backend = self.backend();
-        let (data, maps) = if a_shape == b_shape {
-            (with_pair(self, other, |a, b| backend.binary(op, a, b)), None)
+        let (an, bn) = (self.numel(), other.numel());
+
+        let (data, bkind) = if a_shape == b_shape {
+            (with_pair(self, other, |a, b| backend.binary(op, a, b)), BroadcastKind::Same)
+        } else if out_shape == a_shape
+            && bn > 0
+            && an % bn == 0
+            && b_shape.last() == a_shape.last()
+            && b_shape[..b_shape.len() - 1].iter().all(|&s| s == 1)
+        {
+            let d = bn;
+            let outer = an / d;
+            let out = with_pair(self, other, |a, b| {
+                let mut out = vec![0.0f32; an];
+                for o in 0..outer {
+                    let ra = &a[o * d..(o + 1) * d];
+                    let ro = &mut out[o * d..(o + 1) * d];
+                    for (dst, (&av, &bv)) in ro.iter_mut().zip(ra.iter().zip(b.iter())) {
+                        *dst = op.apply(av, bv);
+                    }
+                }
+                out
+            });
+            (out, BroadcastKind::LastDimB { outer, d })
+        } else if a_shape.len() == 4
+            && b_shape.len() == 4
+            && b_shape[0] == 1
+            && b_shape[1] == a_shape[1]
+            && b_shape[2] == 1
+            && b_shape[3] == 1
+        {
+            let (n, c, spatial) = (a_shape[0], a_shape[1], a_shape[2] * a_shape[3]);
+            let out = with_pair(self, other, |a, b| {
+                let mut out = vec![0.0f32; an];
+                for bi in 0..n {
+                    for ch in 0..c {
+                        let bv = b[ch];
+                        let base = (bi * c + ch) * spatial;
+                        let ra = &a[base..base + spatial];
+                        let ro = &mut out[base..base + spatial];
+                        for (dst, &av) in ro.iter_mut().zip(ra.iter()) {
+                            *dst = op.apply(av, bv);
+                        }
+                    }
+                }
+                out
+            });
+            (out, BroadcastKind::Channel4dB { n, c, spatial })
         } else {
             let ma = shape::broadcast_index_map(&a_shape, &out_shape);
             let mb = shape::broadcast_index_map(&b_shape, &out_shape);
             let d = with_pair(self, other, |a, b| ma.iter().zip(&mb).map(|(&i, &j)| op.apply(a[i], b[j])).collect());
-            (d, Some((ma, mb)))
+            (d, BroadcastKind::General(ma, mb))
         };
+
         let (a, b) = (self.clone(), other.clone());
-        let (an, bn) = (self.numel(), other.numel());
         let name = match op {
             BinaryOp::Add => "AddBackward",
             BinaryOp::Sub => "SubBackward",
@@ -74,39 +135,223 @@ impl Tensor {
             self.device(),
             vec![self.clone(), other.clone()],
             name,
-            Box::new(move |g| {
-                let n = g.len();
-                let ai = |i: usize| maps.as_ref().map_or(i, |m| m.0[i]);
-                let bi = |i: usize| maps.as_ref().map_or(i, |m| m.1[i]);
-                let need_vals = matches!(op, BinaryOp::Mul | BinaryOp::Div);
-                let ad = if need_vals { a.to_vec() } else { Vec::new() };
-                let bd = if need_vals { b.to_vec() } else { Vec::new() };
-                let ga = a.requires_grad().then(|| -> Vec<f32> {
-                    match op {
+            Box::new(move |g| match &bkind {
+                BroadcastKind::Same => {
+                    let ga = a.requires_grad().then(|| match op {
                         BinaryOp::Add | BinaryOp::Sub => g.to_vec(),
-                        BinaryOp::Mul => (0..n).map(|i| g[i] * bd[bi(i)]).collect(),
-                        BinaryOp::Div => (0..n).map(|i| g[i] / bd[bi(i)]).collect(),
-                    }
-                });
-                let gb = b.requires_grad().then(|| -> Vec<f32> {
-                    match op {
+                        BinaryOp::Mul => {
+                            let bd = b.data();
+                            g.iter().zip(bd.iter()).map(|(&gv, &bv)| gv * bv).collect()
+                        }
+                        BinaryOp::Div => {
+                            let bd = b.data();
+                            g.iter().zip(bd.iter()).map(|(&gv, &bv)| gv / bv).collect()
+                        }
+                    });
+                    let gb = b.requires_grad().then(|| match op {
                         BinaryOp::Add => g.to_vec(),
-                        BinaryOp::Sub => g.iter().map(|v| -v).collect(),
-                        BinaryOp::Mul => (0..n).map(|i| g[i] * ad[ai(i)]).collect(),
-                        BinaryOp::Div => (0..n)
-                            .map(|i| {
-                                let bv = bd[bi(i)];
-                                -g[i] * ad[ai(i)] / (bv * bv)
-                            })
-                            .collect(),
-                    }
-                });
-                match &maps {
-                    None => vec![ga, gb],
-                    Some((ma, mb)) => vec![
+                        BinaryOp::Sub => g.iter().map(|&v| -v).collect(),
+                        BinaryOp::Mul => {
+                            let ad = a.data();
+                            g.iter().zip(ad.iter()).map(|(&gv, &av)| gv * av).collect()
+                        }
+                        BinaryOp::Div => {
+                            let ad = a.data();
+                            let bd = b.data();
+                            g.iter()
+                                .zip(ad.iter().zip(bd.iter()))
+                                .map(|(&gv, (&av, &bv))| -gv * av / (bv * bv))
+                                .collect()
+                        }
+                    });
+                    vec![ga, gb]
+                }
+                &BroadcastKind::LastDimB { outer, d } => {
+                    let ga = a.requires_grad().then(|| match op {
+                        BinaryOp::Add | BinaryOp::Sub => g.to_vec(),
+                        BinaryOp::Mul => {
+                            let bd = b.data();
+                            let mut out = vec![0.0f32; g.len()];
+                            for o in 0..outer {
+                                let rg = &g[o * d..(o + 1) * d];
+                                let ro = &mut out[o * d..(o + 1) * d];
+                                for j in 0..d {
+                                    ro[j] = rg[j] * bd[j];
+                                }
+                            }
+                            out
+                        }
+                        BinaryOp::Div => {
+                            let bd = b.data();
+                            let mut out = vec![0.0f32; g.len()];
+                            for o in 0..outer {
+                                let rg = &g[o * d..(o + 1) * d];
+                                let ro = &mut out[o * d..(o + 1) * d];
+                                for j in 0..d {
+                                    ro[j] = rg[j] / bd[j];
+                                }
+                            }
+                            out
+                        }
+                    });
+                    let gb = b.requires_grad().then(|| {
+                        let mut out = vec![0.0f32; d];
+                        match op {
+                            BinaryOp::Add => {
+                                for o in 0..outer {
+                                    let rg = &g[o * d..(o + 1) * d];
+                                    for (dst, &gv) in out.iter_mut().zip(rg.iter()) {
+                                        *dst += gv;
+                                    }
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                for o in 0..outer {
+                                    let rg = &g[o * d..(o + 1) * d];
+                                    for (dst, &gv) in out.iter_mut().zip(rg.iter()) {
+                                        *dst -= gv;
+                                    }
+                                }
+                            }
+                            BinaryOp::Mul => {
+                                let ad = a.data();
+                                for o in 0..outer {
+                                    let rg = &g[o * d..(o + 1) * d];
+                                    let ra = &ad[o * d..(o + 1) * d];
+                                    for j in 0..d {
+                                        out[j] += rg[j] * ra[j];
+                                    }
+                                }
+                            }
+                            BinaryOp::Div => {
+                                let ad = a.data();
+                                let bd = b.data();
+                                for o in 0..outer {
+                                    let rg = &g[o * d..(o + 1) * d];
+                                    let ra = &ad[o * d..(o + 1) * d];
+                                    for j in 0..d {
+                                        out[j] -= rg[j] * ra[j] / (bd[j] * bd[j]);
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    });
+                    vec![ga, gb]
+                }
+                &BroadcastKind::Channel4dB { n, c, spatial } => {
+                    let ga = a.requires_grad().then(|| match op {
+                        BinaryOp::Add | BinaryOp::Sub => g.to_vec(),
+                        BinaryOp::Mul => {
+                            let bd = b.data();
+                            let mut out = vec![0.0f32; g.len()];
+                            for bi in 0..n {
+                                for ch in 0..c {
+                                    let bv = bd[ch];
+                                    let base = (bi * c + ch) * spatial;
+                                    for (dst, &gv) in out[base..base + spatial].iter_mut().zip(&g[base..base + spatial]) {
+                                        *dst = gv * bv;
+                                    }
+                                }
+                            }
+                            out
+                        }
+                        BinaryOp::Div => {
+                            let bd = b.data();
+                            let mut out = vec![0.0f32; g.len()];
+                            for bi in 0..n {
+                                for ch in 0..c {
+                                    let bv = bd[ch];
+                                    let base = (bi * c + ch) * spatial;
+                                    for (dst, &gv) in out[base..base + spatial].iter_mut().zip(&g[base..base + spatial]) {
+                                        *dst = gv / bv;
+                                    }
+                                }
+                            }
+                            out
+                        }
+                    });
+                    let gb = b.requires_grad().then(|| {
+                        let mut out = vec![0.0f32; c];
+                        match op {
+                            BinaryOp::Add => {
+                                for bi in 0..n {
+                                    for ch in 0..c {
+                                        let base = (bi * c + ch) * spatial;
+                                        out[ch] += g[base..base + spatial].iter().sum::<f32>();
+                                    }
+                                }
+                            }
+                            BinaryOp::Sub => {
+                                for bi in 0..n {
+                                    for ch in 0..c {
+                                        let base = (bi * c + ch) * spatial;
+                                        out[ch] -= g[base..base + spatial].iter().sum::<f32>();
+                                    }
+                                }
+                            }
+                            BinaryOp::Mul => {
+                                let ad = a.data();
+                                for bi in 0..n {
+                                    for ch in 0..c {
+                                        let base = (bi * c + ch) * spatial;
+                                        out[ch] += g[base..base + spatial]
+                                            .iter()
+                                            .zip(&ad[base..base + spatial])
+                                            .map(|(&gv, &av)| gv * av)
+                                            .sum::<f32>();
+                                    }
+                                }
+                            }
+                            BinaryOp::Div => {
+                                let ad = a.data();
+                                let bd = b.data();
+                                for bi in 0..n {
+                                    for ch in 0..c {
+                                        let base = (bi * c + ch) * spatial;
+                                        let denom = bd[ch] * bd[ch];
+                                        out[ch] -= g[base..base + spatial]
+                                            .iter()
+                                            .zip(&ad[base..base + spatial])
+                                            .map(|(&gv, &av)| gv * av / denom)
+                                            .sum::<f32>();
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    });
+                    vec![ga, gb]
+                }
+                BroadcastKind::General(ma, mb) => {
+                    let n = g.len();
+                    let need_vals = matches!(op, BinaryOp::Mul | BinaryOp::Div);
+                    let ad = if need_vals { a.to_vec() } else { Vec::new() };
+                    let bd = if need_vals { b.to_vec() } else { Vec::new() };
+                    let ga = a.requires_grad().then(|| -> Vec<f32> {
+                        match op {
+                            BinaryOp::Add | BinaryOp::Sub => g.to_vec(),
+                            BinaryOp::Mul => (0..n).map(|i| g[i] * bd[mb[i]]).collect(),
+                            BinaryOp::Div => (0..n).map(|i| g[i] / bd[mb[i]]).collect(),
+                        }
+                    });
+                    let gb = b.requires_grad().then(|| -> Vec<f32> {
+                        match op {
+                            BinaryOp::Add => g.to_vec(),
+                            BinaryOp::Sub => g.iter().map(|v| -v).collect(),
+                            BinaryOp::Mul => (0..n).map(|i| g[i] * ad[ma[i]]).collect(),
+                            BinaryOp::Div => (0..n)
+                                .map(|i| {
+                                    let bv = bd[mb[i]];
+                                    -g[i] * ad[ma[i]] / (bv * bv)
+                                })
+                                .collect(),
+                        }
+                    });
+                    vec![
                         ga.map(|v| shape::reduce_by_map(&v, ma, an)),
                         gb.map(|v| shape::reduce_by_map(&v, mb, bn)),
-                    ],
+                    ]
                 }
             }),
         )
@@ -183,8 +428,10 @@ impl Tensor {
 
     fn unary(&self, op: UnaryOp) -> Tensor {
         let y = self.backend().unary(op, &self.data());
+        let needs_grad = autograd::is_grad_enabled() && self.requires_grad();
+        let needs_y = matches!(op, UnaryOp::Exp | UnaryOp::Sigmoid | UnaryOp::Tanh | UnaryOp::Sqrt);
+        let yc = if needs_grad && needs_y { y.clone() } else { Vec::new() };
         let x = self.clone();
-        let yc = y.clone();
         Tensor::from_op(
             y,
             self.shape().to_vec(),
@@ -193,7 +440,24 @@ impl Tensor {
             unary_name(op),
             Box::new(move |g| {
                 let xd = x.data();
-                vec![Some(g.iter().enumerate().map(|(i, gv)| gv * op.derivative(xd[i], yc[i])).collect())]
+                let grad = if matches!(op, UnaryOp::Relu) {
+                    if g.len() >= 32 * 1024 {
+                        g.par_iter()
+                            .zip(xd.par_iter())
+                            .map(|(&gv, &xv)| if xv > 0.0 { gv } else { 0.0 })
+                            .collect()
+                    } else {
+                        g.iter()
+                            .zip(xd.iter())
+                            .map(|(&gv, &xv)| if xv > 0.0 { gv } else { 0.0 })
+                            .collect()
+                    }
+                } else if needs_y {
+                    g.iter().enumerate().map(|(i, &gv)| gv * op.derivative(xd[i], yc[i])).collect()
+                } else {
+                    g.iter().enumerate().map(|(i, &gv)| gv * op.derivative(xd[i], 0.0)).collect()
+                };
+                vec![Some(grad)]
             }),
         )
     }
@@ -301,8 +565,8 @@ impl Tensor {
             vec![self.clone(), other.clone()],
             "BmmBackward",
             Box::new(move |g| {
-                let ad = a.to_vec();
-                let bd = b.to_vec();
+                let ad = a.data();
+                let bd = b.data();
                 let mut ga = a.requires_grad().then(|| Vec::with_capacity(bs * m * k));
                 let mut gb = b.requires_grad().then(|| Vec::with_capacity(bs * k * n));
                 for i in 0..bs {
@@ -542,7 +806,6 @@ impl Tensor {
         let mm = |a: &[f32], b: &[f32], m: usize, kk: usize, nn: usize| be.matmul(a, b, m, kk, nn);
         let (out, oh, ow) = with_pair(self, weight, |x, wt| kernels::conv2d_forward(x, wt, n, c, h, w, o, k, stride, padding, &mm));
         let (x, wt) = (self.clone(), weight.clone());
-        let be2 = be.clone();
         Tensor::from_op(
             out,
             vec![n, o, oh, ow],
@@ -552,25 +815,96 @@ impl Tensor {
             Box::new(move |g| {
                 let l = oh * ow;
                 let ckk = c * k * k;
-                let xd = x.to_vec();
-                let wd = wt.to_vec();
-                let wt_t = shape::transpose2d(&wd, o, ckk);
-                let mut gw = vec![0.0f32; o * ckk];
-                let mut gx = x.requires_grad().then(|| vec![0.0f32; n * c * h * w]);
-                for b in 0..n {
-                    let gb = &g[b * o * l..(b + 1) * o * l];
-                    if wt.requires_grad() {
-                        let cols = kernels::im2col(&xd[b * c * h * w..(b + 1) * c * h * w], c, h, w, k, stride, padding);
-                        let cols_t = shape::transpose2d(&cols, ckk, l);
-                        let gwb = be2.matmul(gb, &cols_t, o, l, ckk);
-                        gw.iter_mut().zip(gwb).for_each(|(a, v)| *a += v);
+                let img_stride = c * h * w;
+                let out_stride = o * l;
+                let need_gw = wt.requires_grad();
+                let need_gx = x.requires_grad();
+                let xd = x.data();
+                let wd = wt.data();
+                let wt_t = if need_gx { shape::transpose2d(&wd, o, ckk) } else { Vec::new() };
+
+                if n >= 2 && (need_gw || need_gx) {
+                    let mut gx = need_gx.then(|| vec![0.0f32; n * img_stride]);
+                    let gw = if let Some(gx_slice) = gx.as_mut() {
+                        let gw_reduced = gx_slice
+                            .par_chunks_mut(img_stride)
+                            .enumerate()
+                            .fold(
+                                || {
+                                    (
+                                        vec![0.0f32; if need_gw { o * ckk } else { 0 }],
+                                        vec![0.0f32; if need_gw { ckk * l } else { 0 }],
+                                        vec![0.0f32; ckk * l],
+                                    )
+                                },
+                                |(mut gw_acc, mut cols, mut dcols), (b, gx_b)| {
+                                    let gb = &g[b * out_stride..(b + 1) * out_stride];
+                                    if need_gw {
+                                        let img = &xd[b * img_stride..(b + 1) * img_stride];
+                                        kernels::im2col_into(img, c, h, w, k, stride, padding, oh, ow, &mut cols);
+                                        cpu_matmul_nt_add_into(gb, &cols, &mut gw_acc, o, ckk, l);
+                                    }
+                                    cpu_matmul_into(&wt_t, gb, &mut dcols, ckk, o, l);
+                                    kernels::col2im(&dcols, c, h, w, k, stride, padding, gx_b);
+                                    (gw_acc, cols, dcols)
+                                },
+                            )
+                            .map(|(gw_acc, _, _)| gw_acc)
+                            .reduce(
+                                || vec![0.0f32; if need_gw { o * ckk } else { 0 }],
+                                |mut a, b| {
+                                    for (av, bv) in a.iter_mut().zip(b) {
+                                        *av += bv;
+                                    }
+                                    a
+                                },
+                            );
+                        need_gw.then_some(gw_reduced)
+                    } else if need_gw {
+                        let gw_reduced = (0..n)
+                            .into_par_iter()
+                            .fold(
+                                || (vec![0.0f32; o * ckk], vec![0.0f32; ckk * l]),
+                                |(mut gw_acc, mut cols), b| {
+                                    let gb = &g[b * out_stride..(b + 1) * out_stride];
+                                    let img = &xd[b * img_stride..(b + 1) * img_stride];
+                                    kernels::im2col_into(img, c, h, w, k, stride, padding, oh, ow, &mut cols);
+                                    cpu_matmul_nt_add_into(gb, &cols, &mut gw_acc, o, ckk, l);
+                                    (gw_acc, cols)
+                                },
+                            )
+                            .map(|(gw_acc, _)| gw_acc)
+                            .reduce(
+                                || vec![0.0f32; o * ckk],
+                                |mut a, b| {
+                                    for (av, bv) in a.iter_mut().zip(b) {
+                                        *av += bv;
+                                    }
+                                    a
+                                },
+                            );
+                        Some(gw_reduced)
+                    } else {
+                        None
+                    };
+                    vec![gx, gw]
+                } else {
+                    let mut gw = vec![0.0f32; o * ckk];
+                    let mut gx = need_gx.then(|| vec![0.0f32; n * img_stride]);
+                    let mut cols = vec![0.0f32; ckk * l];
+                    for b in 0..n {
+                        let gb = &g[b * out_stride..(b + 1) * out_stride];
+                        if need_gw {
+                            kernels::im2col_into(&xd[b * img_stride..(b + 1) * img_stride], c, h, w, k, stride, padding, oh, ow, &mut cols);
+                            cpu_matmul_nt_add_into(gb, &cols, &mut gw, o, ckk, l);
+                        }
+                        if let Some(gx) = gx.as_mut() {
+                            let dcols = cpu_matmul_serial(&wt_t, gb, ckk, o, l);
+                            kernels::col2im(&dcols, c, h, w, k, stride, padding, &mut gx[b * img_stride..(b + 1) * img_stride]);
+                        }
                     }
-                    if let Some(gx) = gx.as_mut() {
-                        let dcols = be2.matmul(&wt_t, gb, ckk, o, l);
-                        kernels::col2im(&dcols, c, h, w, k, stride, padding, &mut gx[b * c * h * w..(b + 1) * c * h * w]);
-                    }
+                    vec![gx, need_gw.then_some(gw)]
                 }
-                vec![gx, wt.requires_grad().then_some(gw)]
             }),
         )
     }
@@ -689,8 +1023,6 @@ impl Tensor {
         )
     }
 }
-
-use crate::device::Device;
 
 pub(crate) fn softmax_raw(x: &[f32], outer: usize, size: usize, inner: usize) -> Vec<f32> {
     let mut y = vec![0.0; x.len()];

@@ -21,9 +21,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod wgpu_impl;
 
 /// Minimum `m*k*n` for a matmul to be sent to the GPU.
-static MATMUL_THRESHOLD: AtomicUsize = AtomicUsize::new(48 * 48 * 48);
+/// Default is set to 64M multiply-adds so small/medium matrices run immediately
+/// on the AVX2+FMA Rayon CPU microkernel without host<->device PCIe/fence stalls.
+static MATMUL_THRESHOLD: AtomicUsize = AtomicUsize::new(512 * 512 * 256);
 /// Minimum element count for an element-wise op to be sent to the GPU.
-static ELEMWISE_THRESHOLD: AtomicUsize = AtomicUsize::new(1 << 20);
+static ELEMWISE_THRESHOLD: AtomicUsize = AtomicUsize::new(4 << 20);
 
 /// Configure when work is offloaded to a physical GPU.
 ///

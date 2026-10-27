@@ -26,10 +26,16 @@ impl ModelEMA {
     /// Name and shape mismatches return an error before any average changes.
     pub fn update(&mut self, model: &dyn Module) -> Result<(), String> {
         let current = self.matching_state(model)?;
+        let decay = self.decay;
+        let one_minus_decay = 1.0 - decay;
         for ((_, average), tensor) in self.state.iter().zip(current) {
-            let data = tensor.to_vec();
-            for (a, value) in average.data_mut().iter_mut().zip(data) {
-                *a = self.decay * *a + (1.0 - self.decay) * value;
+            if average.id() == tensor.id() {
+                continue;
+            }
+            let src = tensor.data();
+            let mut dst = average.data_mut();
+            for (a, &value) in dst.iter_mut().zip(src.iter()) {
+                *a = decay * *a + one_minus_decay * value;
             }
         }
         self.updates += 1;
@@ -41,7 +47,12 @@ impl ModelEMA {
     pub fn copy_to(&self, model: &dyn Module) -> Result<(), String> {
         let target = self.matching_state(model)?;
         for ((_, average), tensor) in self.state.iter().zip(target) {
-            tensor.copy_from_slice(&average.to_vec());
+            if average.id() == tensor.id() {
+                continue;
+            }
+            let src = average.data();
+            let mut dst = tensor.data_mut();
+            dst.copy_from_slice(&src);
         }
         Ok(())
     }
@@ -57,6 +68,16 @@ impl ModelEMA {
 
     fn matching_state(&self, model: &dyn Module) -> Result<Vec<Tensor>, String> {
         let state = model.state_dict();
+        if state.len() == self.state.len()
+            && state
+                .iter()
+                .zip(&self.state)
+                .all(|((n1, t1), (n2, t2))| n1 == n2 && t1.shape() == t2.shape())
+        {
+            // Fast path: verify no duplicate names in `self.state` (already validated in `new`)
+            return Ok(state.into_iter().map(|(_, t)| t).collect());
+        }
+
         let count = state.len();
         let mut by_name: HashMap<_, _> = state.into_iter().collect();
         if count != by_name.len() || count != self.state.len() {

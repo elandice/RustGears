@@ -94,15 +94,32 @@ pub fn permute(data: &[f32], shape: &[usize], perm: &[usize]) -> (Vec<f32>, Vec<
     (out, out_shape)
 }
 
-/// Transpose a row-major `rows x cols` matrix.
+/// Transpose a row-major `rows x cols` matrix into a new vector.
 pub fn transpose2d(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut out = vec![0.0; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
+    transpose2d_into(data, rows, cols, &mut out);
     out
+}
+
+/// Cache-tiled transpose of a row-major `rows x cols` matrix into `out`.
+pub fn transpose2d_into(data: &[f32], rows: usize, cols: usize, out: &mut [f32]) {
+    const TILE: usize = 32;
+    let mut r0 = 0;
+    while r0 < rows {
+        let r1 = (r0 + TILE).min(rows);
+        let mut c0 = 0;
+        while c0 < cols {
+            let c1 = (c0 + TILE).min(cols);
+            for r in r0..r1 {
+                let row_off = r * cols;
+                for c in c0..c1 {
+                    out[c * rows + r] = data[row_off + c];
+                }
+            }
+            c0 = c1;
+        }
+        r0 = r1;
+    }
 }
 
 /// Split a shape around `dim` into (outer, dim_size, inner).

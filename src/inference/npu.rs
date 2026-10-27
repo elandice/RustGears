@@ -13,12 +13,13 @@
 //! 3. **Tile / systolic execution profiling** – every run records MAC count,
 //!    fused op count, weight compression ratio and per-layer latency.
 
-use super::quantize::{int8_gemm_fused, round_fp16, QuantTensor};
+use super::quantize::{int8_gemm_fused, int8_gemm_fused_serial, round_fp16, QuantTensor};
 use super::{fold_batch_norm, Activation, LayerSpec};
 use crate::kernels;
 use crate::tensor::ops::softmax_raw;
-use crate::tensor::shape::transpose2d;
+use crate::tensor::shape::{transpose2d, transpose2d_into};
 use crate::tensor::Tensor;
+use rayon::prelude::*;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -304,21 +305,60 @@ impl NpuProgram {
                     let ow = kernels::out_size(w, *kernel, *stride, *padding);
                     let l = oh * ow;
                     let ckk = c * *kernel * *kernel;
+                    let img_stride = c * h * w;
+                    let out_stride = *out_channels * l;
                     macs = (n * *out_channels * ckk * l) as u64;
-                    let mut out = Vec::with_capacity(n * *out_channels * l);
-                    for b in 0..n {
-                        let img = &data[b * c * h * w..(b + 1) * c * h * w];
-                        let cols = kernels::im2col(img, c, h, w, *kernel, *stride, *padding); // [ckk, l]
-                        let cols_t = transpose2d(&cols, ckk, l); // [l, ckk]
-                        // compute [l, out] via GEMM, then transpose back to [out, l]
-                        let y_lo = match self.precision {
-                            NpuPrecision::Int8 => {
-                                let aq = QuantTensor::from_f32(&cols_t, &[l, ckk]);
-                                int8_gemm_fused(&aq, weight_q, l, ckk, *out_channels, bias, *act)
+                    let mut out = vec![0.0f32; n * out_stride];
+
+                    if n >= 2 && out_stride > 0 {
+                        let prec = self.precision;
+                        out.par_chunks_mut(out_stride)
+                            .enumerate()
+                            .for_each_init(
+                                || {
+                                    (
+                                        vec![0.0f32; ckk * l],
+                                        vec![0.0f32; l * ckk],
+                                        vec![0i8; l * ckk],
+                                        vec![0.0f32; l * *out_channels],
+                                    )
+                                },
+                                |(cols, cols_t, aq_buf, y_lo), (b, out_b)| {
+                                    let img = &data[b * img_stride..(b + 1) * img_stride];
+                                    kernels::im2col_into(img, c, h, w, *kernel, *stride, *padding, oh, ow, cols);
+                                    transpose2d_into(cols, ckk, l, cols_t);
+                                    match prec {
+                                        NpuPrecision::Int8 => {
+                                            let a_scale = QuantTensor::quantize_into(cols_t, aq_buf);
+                                            int8_gemm_fused_serial(aq_buf, a_scale, weight_q, l, ckk, *out_channels, bias, *act, y_lo);
+                                        }
+                                        NpuPrecision::Fp16 => {
+                                            fp16_gemm_fused_into(cols_t, weight_fp16, l, ckk, *out_channels, bias, *act, y_lo);
+                                        }
+                                    }
+                                    transpose2d_into(y_lo, l, *out_channels, out_b);
+                                },
+                            );
+                    } else {
+                        let mut cols = vec![0.0f32; ckk * l];
+                        let mut cols_t = vec![0.0f32; l * ckk];
+                        let mut aq_buf = vec![0i8; l * ckk];
+                        let mut y_lo = vec![0.0f32; l * *out_channels];
+                        for b in 0..n {
+                            let img = &data[b * img_stride..(b + 1) * img_stride];
+                            kernels::im2col_into(img, c, h, w, *kernel, *stride, *padding, oh, ow, &mut cols);
+                            transpose2d_into(&cols, ckk, l, &mut cols_t);
+                            match self.precision {
+                                NpuPrecision::Int8 => {
+                                    let a_scale = QuantTensor::quantize_into(&cols_t, &mut aq_buf);
+                                    int8_gemm_fused_serial(&aq_buf, a_scale, weight_q, l, ckk, *out_channels, bias, *act, &mut y_lo);
+                                }
+                                NpuPrecision::Fp16 => {
+                                    fp16_gemm_fused_into(&cols_t, weight_fp16, l, ckk, *out_channels, bias, *act, &mut y_lo);
+                                }
                             }
-                            NpuPrecision::Fp16 => fp16_gemm_fused(&cols_t, weight_fp16, l, ckk, *out_channels, bias, *act),
-                        };
-                        out.extend(transpose2d(&y_lo, l, *out_channels));
+                            transpose2d_into(&y_lo, l, *out_channels, &mut out[b * out_stride..(b + 1) * out_stride]);
+                        }
                     }
                     data = out;
                     shape = vec![n, *out_channels, oh, ow];
@@ -365,6 +405,12 @@ impl NpuProgram {
 
 fn fp16_gemm_fused(a: &[f32], b_t: &[f32], m: usize, k: usize, n: usize, bias: &[f32], act: Activation) -> Vec<f32> {
     let mut out = vec![0.0f32; m * n];
+    fp16_gemm_fused_into(a, b_t, m, k, n, bias, act, &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fp16_gemm_fused_into(a: &[f32], b_t: &[f32], m: usize, k: usize, n: usize, bias: &[f32], act: Activation, out: &mut [f32]) {
     for r in 0..m {
         let arow = &a[r * k..(r + 1) * k];
         for c in 0..n {
@@ -376,5 +422,4 @@ fn fp16_gemm_fused(a: &[f32], b_t: &[f32], m: usize, k: usize, n: usize, bias: &
             out[r * n + c] = act.apply(round_fp16(acc + bias[c]));
         }
     }
-    out
 }

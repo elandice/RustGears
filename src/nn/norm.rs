@@ -1,7 +1,7 @@
 //! Normalisation layers.
 
 use super::Module;
-use crate::autograd::no_grad;
+use crate::autograd;
 use crate::inference::LayerSpec;
 use crate::tensor::Tensor;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,43 +60,246 @@ impl Module for BatchNorm {
         let c = self.num_features;
         assert_eq!(x.ndim(), if self.spatial { 4 } else { 2 }, "BatchNorm input rank mismatch");
         assert_eq!(x.shape()[1], c, "BatchNorm channel count mismatch");
-        // bring channels to the last axis: [M, C]
-        let (x2, back) = if self.spatial {
-            let (n, h, w) = (x.shape()[0], x.shape()[2], x.shape()[3]);
-            (x.permute(&[0, 2, 3, 1]).reshape(&[n * h * w, c]), Some((n, h, w)))
-        } else {
-            (x.clone(), None)
-        };
 
-        let xhat = if self.training.load(Ordering::Relaxed) {
-            assert!(x2.shape()[0] > 0, "BatchNorm training statistics must not be empty");
-            let mean = x2.mean_dim(0, true);
-            let var = x2.var_dim(0, true);
-            // update running statistics (not part of the graph)
-            no_grad(|| {
-                let m = self.momentum;
-                let count = x2.shape()[0] as f32;
-                let unbias = if count > 1.0 { count / (count - 1.0) } else { 1.0 };
-                let (mv, vv) = (mean.to_vec(), var.to_vec());
+        let n = x.shape()[0];
+        let s = if self.spatial { x.shape()[2] * x.shape()[3] } else { 1 };
+        let m_count = n * s;
+        let total = n * c * s;
+        let is_train = self.training.load(Ordering::Relaxed);
+        let record_grad = autograd::is_grad_enabled()
+            && (x.requires_grad() || self.gamma.requires_grad() || self.beta.requires_grad());
+
+        if is_train {
+            assert!(m_count > 0, "BatchNorm training statistics must not be empty");
+            let xd = x.data();
+            let gd = self.gamma.data();
+            let bd = self.beta.data();
+
+            let inv_m = 1.0 / (m_count as f32);
+            let mut mean = vec![0.0f32; c];
+            let mut var = vec![0.0f32; c];
+            let mut inv_std = vec![0.0f32; c];
+
+            // Compute per-channel mean and biased variance directly over contiguous spatial slices
+            for bi in 0..n {
+                for ch in 0..c {
+                    let base = (bi * c + ch) * s;
+                    let slice = &xd[base..base + s];
+                    let mut sum = 0.0f32;
+                    for &v in slice {
+                        sum += v;
+                    }
+                    mean[ch] += sum;
+                }
+            }
+            for ch in 0..c {
+                mean[ch] *= inv_m;
+            }
+
+            for bi in 0..n {
+                for ch in 0..c {
+                    let mu = mean[ch];
+                    let base = (bi * c + ch) * s;
+                    let slice = &xd[base..base + s];
+                    let mut vsum = 0.0f32;
+                    for &v in slice {
+                        let d = v - mu;
+                        vsum += d * d;
+                    }
+                    var[ch] += vsum;
+                }
+            }
+            for ch in 0..c {
+                var[ch] *= inv_m;
+                inv_std[ch] = 1.0 / (var[ch] + self.eps).sqrt();
+            }
+
+            // Update running statistics
+            {
+                let mom = self.momentum;
+                let count_f = m_count as f32;
+                let unbias = if count_f > 1.0 { count_f / (count_f - 1.0) } else { 1.0 };
                 let mut rm = self.running_mean.data_mut();
                 let mut rv = self.running_var.data_mut();
-                for i in 0..c {
-                    rm[i] = (1.0 - m) * rm[i] + m * mv[i];
-                    rv[i] = (1.0 - m) * rv[i] + m * vv[i] * unbias;
+                for ch in 0..c {
+                    rm[ch] = (1.0 - mom) * rm[ch] + mom * mean[ch];
+                    rv[ch] = (1.0 - mom) * rv[ch] + mom * var[ch] * unbias;
                 }
-            });
-            x2.sub(&mean).div(&var.add_scalar(self.eps).sqrt())
-        } else {
-            let rm = self.running_mean.clone();
-            let rstd = Tensor::from_vec(self.running_var.data().iter().map(|v| (v + self.eps).sqrt()).collect(), &[c])
-                .on(x.device());
-            x2.sub(&rm).div(&rstd)
-        };
-        let y = xhat.mul(&self.gamma).add(&self.beta);
+            }
 
-        match back {
-            Some((n, h, w)) => y.reshape(&[n, h, w, c]).permute(&[0, 3, 1, 2]),
-            None => y,
+            let mut y = vec![0.0f32; total];
+            let mut xhat = if record_grad { vec![0.0f32; total] } else { Vec::new() };
+
+            for bi in 0..n {
+                for ch in 0..c {
+                    let mu = mean[ch];
+                    let istd = inv_std[ch];
+                    let gam = gd[ch];
+                    let bet = bd[ch];
+                    let base = (bi * c + ch) * s;
+                    let xs = &xd[base..base + s];
+                    let ys = &mut y[base..base + s];
+                    if record_grad {
+                        let xhs = &mut xhat[base..base + s];
+                        for i in 0..s {
+                            let xh = (xs[i] - mu) * istd;
+                            xhs[i] = xh;
+                            ys[i] = xh * gam + bet;
+                        }
+                    } else {
+                        let scale = gam * istd;
+                        let shift = bet - mu * scale;
+                        for i in 0..s {
+                            ys[i] = xs[i] * scale + shift;
+                        }
+                    }
+                }
+            }
+            drop(xd);
+            drop(gd);
+            drop(bd);
+
+            let (xt, gt, bt) = (x.clone(), self.gamma.clone(), self.beta.clone());
+            Tensor::from_op(
+                y,
+                x.shape().to_vec(),
+                x.device(),
+                vec![x.clone(), self.gamma.clone(), self.beta.clone()],
+                "BatchNormBackward",
+                Box::new(move |dy| {
+                    let mut dgamma = vec![0.0f32; c];
+                    let mut dbeta = vec![0.0f32; c];
+                    for bi in 0..n {
+                        for ch in 0..c {
+                            let base = (bi * c + ch) * s;
+                            let dys = &dy[base..base + s];
+                            let xhs = &xhat[base..base + s];
+                            let mut sb = 0.0f32;
+                            let mut sg = 0.0f32;
+                            for i in 0..s {
+                                sb += dys[i];
+                                sg += dys[i] * xhs[i];
+                            }
+                            dbeta[ch] += sb;
+                            dgamma[ch] += sg;
+                        }
+                    }
+
+                    let dx = xt.requires_grad().then(|| {
+                        let gd = gt.data();
+                        let mf = m_count as f32;
+                        let mut dx = vec![0.0f32; total];
+                        for bi in 0..n {
+                            for ch in 0..c {
+                                let factor = gd[ch] * inv_std[ch] / mf;
+                                let db = dbeta[ch];
+                                let dg = dgamma[ch];
+                                let base = (bi * c + ch) * s;
+                                let dys = &dy[base..base + s];
+                                let xhs = &xhat[base..base + s];
+                                let dxs = &mut dx[base..base + s];
+                                for i in 0..s {
+                                    dxs[i] = factor * (mf * dys[i] - db - xhs[i] * dg);
+                                }
+                            }
+                        }
+                        dx
+                    });
+
+                    vec![
+                        dx,
+                        gt.requires_grad().then_some(dgamma),
+                        bt.requires_grad().then_some(dbeta),
+                    ]
+                }),
+            )
+        } else {
+            let xd = x.data();
+            let gd = self.gamma.data();
+            let bd = self.beta.data();
+            let rm = self.running_mean.data();
+            let rv = self.running_var.data();
+
+            let mut inv_std = vec![0.0f32; c];
+            let mut scale = vec![0.0f32; c];
+            let mut shift = vec![0.0f32; c];
+            for ch in 0..c {
+                inv_std[ch] = 1.0 / (rv[ch] + self.eps).sqrt();
+                scale[ch] = gd[ch] * inv_std[ch];
+                shift[ch] = bd[ch] - rm[ch] * scale[ch];
+            }
+
+            let mut y = vec![0.0f32; total];
+            for bi in 0..n {
+                for ch in 0..c {
+                    let sc = scale[ch];
+                    let sh = shift[ch];
+                    let base = (bi * c + ch) * s;
+                    let xs = &xd[base..base + s];
+                    let ys = &mut y[base..base + s];
+                    for i in 0..s {
+                        ys[i] = xs[i] * sc + sh;
+                    }
+                }
+            }
+            let rm_vec = if record_grad { rm.clone() } else { Vec::new() };
+            drop(xd);
+            drop(gd);
+            drop(bd);
+            drop(rm);
+            drop(rv);
+
+            let (xt, gt, bt) = (x.clone(), self.gamma.clone(), self.beta.clone());
+            Tensor::from_op(
+                y,
+                x.shape().to_vec(),
+                x.device(),
+                vec![x.clone(), self.gamma.clone(), self.beta.clone()],
+                "BatchNormEvalBackward",
+                Box::new(move |dy| {
+                    let dx = xt.requires_grad().then(|| {
+                        let mut dx = vec![0.0f32; total];
+                        for bi in 0..n {
+                            for ch in 0..c {
+                                let sc = scale[ch];
+                                let base = (bi * c + ch) * s;
+                                for (dst, &g) in dx[base..base + s].iter_mut().zip(&dy[base..base + s]) {
+                                    *dst = g * sc;
+                                }
+                            }
+                        }
+                        dx
+                    });
+                    let dgamma = gt.requires_grad().then(|| {
+                        let xd = xt.data();
+                        let mut dg = vec![0.0f32; c];
+                        for bi in 0..n {
+                            for ch in 0..c {
+                                let base = (bi * c + ch) * s;
+                                let mu = rm_vec[ch];
+                                let istd = inv_std[ch];
+                                let mut sum = 0.0f32;
+                                for i in 0..s {
+                                    sum += dy[base + i] * (xd[base + i] - mu) * istd;
+                                }
+                                dg[ch] += sum;
+                            }
+                        }
+                        dg
+                    });
+                    let dbeta = bt.requires_grad().then(|| {
+                        let mut db = vec![0.0f32; c];
+                        for bi in 0..n {
+                            for ch in 0..c {
+                                let base = (bi * c + ch) * s;
+                                db[ch] += dy[base..base + s].iter().sum::<f32>();
+                            }
+                        }
+                        db
+                    });
+                    vec![dx, dgamma, dbeta]
+                }),
+            )
         }
     }
 
