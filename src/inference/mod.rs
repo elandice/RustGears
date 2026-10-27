@@ -1,12 +1,11 @@
-//! Portable inference format, graph optimisation, INT8 quantisation and the
-//! NPU execution runtime.
+//! 이식 가능한 추론 모델 포맷, 연산 그래프 최적화, INT8 양자화 및 NPU 실행 런타임.
 //!
-//! Trained [`Module`](crate::nn::Module)s can be exported into a lightweight
-//! [`InferenceSession`] and executed on:
-//! * [`ExecutionProvider::Npu`] – INT8/FP16 inference engine modelling an NPU
-//!   systolic MAC array with operator fusion (`Linear/Conv2d + BatchNorm + Activation`),
-//! * [`ExecutionProvider::Gpu`] – GPU compute backend,
-//! * [`ExecutionProvider::Cpu`] – multi-threaded CPU backend.
+//! 학습된 [`Module`](crate::nn::Module)을 경량화된 [`InferenceSession`]으로 내보내어
+//! 다양한 하드웨어 백엔드에서 고속으로 실행할 수 있습니다:
+//! * [`ExecutionProvider::Npu`] – 연산자 융합(`Linear/Conv2d + BatchNorm + Activation`)과
+//!   INT8/FP16 시스톨릭 MAC 어레이를 시뮬레이션하는 NPU 추론 엔진,
+//! * [`ExecutionProvider::Gpu`] – GPU(WGPU) 가속 연산 백엔드,
+//! * [`ExecutionProvider::Cpu`] – Rayon 기반 멀티스레드 CPU 백엔드.
 
 pub mod npu;
 pub mod quantize;
@@ -22,7 +21,7 @@ use crate::tensor::Tensor;
 use std::fmt;
 use std::sync::Mutex;
 
-/// Activation functions supported by the inference graph and NPU fusion unit.
+/// 추론 그래프 및 NPU 융합 유닛에서 지원하는 활성화 함수 열거형.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Activation {
     None,
@@ -34,6 +33,7 @@ pub enum Activation {
 }
 
 impl Activation {
+    /// 스칼라 값 `x`에 활성화 함수를 적용합니다.
     #[inline]
     pub fn apply(self, x: f32) -> f32 {
         match self {
@@ -66,7 +66,7 @@ impl fmt::Display for Activation {
     }
 }
 
-/// Portable layer specification produced by [`Module::export`].
+/// [`Module::export`]를 통해 추출되는 이식 가능한 레이어 명세(IR).
 #[derive(Clone, Debug)]
 pub enum LayerSpec {
     Linear {
@@ -84,8 +84,8 @@ pub enum LayerSpec {
         weight: Vec<f32>,
         bias: Vec<f32>,
     },
-    /// Exported form of BatchNorm: `y_c = scale_c * x_c + shift_c`.
-    /// The graph optimiser folds this directly into the preceding Linear/Conv2d.
+    /// BatchNorm의 내보내기 형태: `y_c = scale_c * x_c + shift_c`.
+    /// 그래프 최적화 단계에서 선행 Linear/Conv2d로 직접 폴딩(융합)됩니다.
     ChannelAffine {
         scale: Vec<f32>,
         shift: Vec<f32>,
@@ -99,28 +99,29 @@ pub enum LayerSpec {
     Softmax,
 }
 
-/// Hardware execution provider for inference (ONNX Runtime style).
+/// 추론 실행 하드웨어 공급자 (ONNX Runtime 스타일의 Execution Provider).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionProvider {
-    /// CPU execution provider (FP32, rayon).
+    /// CPU 실행 공급자 (FP32, Rayon 멀티스레딩).
     Cpu,
-    /// GPU execution provider (`gpu:index`, FP32).
+    /// GPU 실행 공급자 (`gpu:index`, FP32).
     Gpu(usize),
-    /// Neural Processing Unit (NPU) execution provider with operator fusion and
-    /// INT8 / FP16 quantised MAC execution.
+    /// 연산자 융합 및 INT8 / FP16 양자화 MAC 연산을 지원하는 신경망 처리 장치(NPU) 실행 공급자.
     Npu(NpuPrecision),
 }
 
 impl ExecutionProvider {
-    /// Default NPU provider (INT8 symmetric quantisation).
+    /// 기본 NPU 실행 공급자 생성 (INT8 대칭 양자화).
     pub fn npu() -> Self {
         ExecutionProvider::Npu(NpuPrecision::Int8)
     }
 
+    /// INT8 양자화 NPU 공급자 생성.
     pub fn npu_int8() -> Self {
         ExecutionProvider::Npu(NpuPrecision::Int8)
     }
 
+    /// FP16 반정밀도 NPU 공급자 생성.
     pub fn npu_fp16() -> Self {
         ExecutionProvider::Npu(NpuPrecision::Fp16)
     }
@@ -141,7 +142,7 @@ enum CompiledProgram {
     Npu(npu::NpuProgram),
 }
 
-/// Compiled inference session ready to execute a trained model.
+/// 학습된 모델을 컴파일하여 최적화된 상태로 추론을 수행하는 세션.
 pub struct InferenceSession {
     provider: ExecutionProvider,
     raw_layers: Vec<LayerSpec>,
@@ -150,14 +151,14 @@ pub struct InferenceSession {
 }
 
 impl InferenceSession {
-    /// Export `model` and compile it for `provider`.
+    /// `model`의 가중치를 추출하고 지정된 `provider`에 맞게 컴파일합니다.
     pub fn from_module(model: &dyn Module, provider: ExecutionProvider) -> Result<Self, String> {
         model.eval();
         let layers = model.export()?;
         Ok(Self::from_layers(layers, provider))
     }
 
-    /// Build a session from raw [`LayerSpec`]s.
+    /// 원시 [`LayerSpec`] 목록으로부터 추론 세션을 빌드합니다.
     pub fn from_layers(raw_layers: Vec<LayerSpec>, provider: ExecutionProvider) -> Self {
         let program = match provider {
             ExecutionProvider::Cpu => CompiledProgram::Standard {
@@ -178,20 +179,22 @@ impl InferenceSession {
         }
     }
 
+    /// 설정된 실행 공급자를 반환합니다.
     pub fn provider(&self) -> ExecutionProvider {
         self.provider
     }
 
+    /// 컴파일 전 원본 레이어 목록을 반환합니다.
     pub fn raw_layers(&self) -> &[LayerSpec] {
         &self.raw_layers
     }
 
-    /// Profile from the most recent NPU [`run`](Self::run) call.
+    /// 가장 최근 NPU [`run`](Self::run) 호출 시 기록된 프로파일 정보를 반환합니다.
     pub fn last_npu_profile(&self) -> Option<NpuProfile> {
         self.last_profile.lock().unwrap().clone()
     }
 
-    /// Summary of graph optimisations and memory compression applied by the session.
+    /// 세션에 적용된 그래프 최적화 및 메모리 압축 결과 요약 보고서를 반환합니다.
     pub fn compilation_report(&self) -> String {
         match &self.program {
             CompiledProgram::Standard { device, layers } => format!(
@@ -205,7 +208,7 @@ impl InferenceSession {
         }
     }
 
-    /// Execute the compiled model on `input` (no autograd graph is recorded).
+    /// 주어진 `input` 텐서에 대해 컴파일된 모델 추론을 실행합니다 (Autograd 그래프는 기록되지 않음).
     pub fn run(&self, input: &Tensor) -> Tensor {
         match &self.program {
             CompiledProgram::Standard { device, layers } => run_standard(input, *device, layers),
@@ -218,7 +221,7 @@ impl InferenceSession {
     }
 }
 
-/// Fold `ChannelAffine` (BatchNorm) into a preceding `Linear` or `Conv2d`.
+/// `ChannelAffine` (BatchNorm)을 선행하는 `Linear` 또는 `Conv2d`에 흡수(Fold)하는 그래프 최적화.
 pub(crate) fn fold_batch_norm(layers: &[LayerSpec]) -> Vec<LayerSpec> {
     let mut out: Vec<LayerSpec> = Vec::with_capacity(layers.len());
     for l in layers {
@@ -253,6 +256,7 @@ pub(crate) fn fold_batch_norm(layers: &[LayerSpec]) -> Vec<LayerSpec> {
     out
 }
 
+/// CPU 또는 GPU 표준 디바이스 백엔드를 사용한 추론 실행 함수.
 fn run_standard(input: &Tensor, device: Device, layers: &[LayerSpec]) -> Tensor {
     let be = device.backend();
     let mut data = input.to_vec();

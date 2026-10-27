@@ -1,13 +1,14 @@
-//! Multi-threaded CPU backend (rayon work-stealing thread pool + AVX2/FMA SIMD microkernels).
+//! 멀티스레드 CPU 연산 백엔드 (Rayon 작업 훔치기(work-stealing) 스레드 풀 + AVX2/FMA SIMD 마이크로커널).
 
 use super::backend::{Backend, BinaryOp, UnaryOp};
 use rayon::prelude::*;
 
-/// Below this many elements the work is executed on the calling thread.
+/// 병렬 오버헤드를 피하기 위해 이 개수 미만의 요소는 호출 스레드에서 동기 실행합니다.
 const PAR_THRESHOLD: usize = 32 * 1024;
-/// Minimum `m * k * n` work before spawning Rayon tasks for matmul.
+/// 행렬 곱셈 시 Rayon 멀티스레드 태스크를 생성하기 위한 최소 `m * k * n` 연산량 기준
 const MATMUL_PAR_THRESHOLD: usize = 128 * 1024;
 
+/// Rayon 및 AVX2 SIMD 기반 CPU 연산 백엔드
 #[derive(Default)]
 pub struct CpuBackend;
 
@@ -38,7 +39,7 @@ impl Backend for CpuBackend {
     }
 }
 
-/// Cache-blocked and AVX2+FMA register-blocked matrix multiplication (`C[m,n] = A[m,k] @ B[k,n]`).
+/// 캐시 블록화 및 AVX2+FMA 레지스터 블록화가 적용된 CPU 행렬 곱셈 (`C[m,n] = A[m,k] @ B[k,n]`).
 pub fn cpu_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     assert_eq!(a.len(), m * k, "matmul: lhs size mismatch");
     assert_eq!(b.len(), k * n, "matmul: rhs size mismatch");
@@ -47,7 +48,7 @@ pub fn cpu_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
         return c;
     }
     if m * k * n >= MATMUL_PAR_THRESHOLD && m >= 8 {
-        // Partition into chunks of 4 rows so each worker executes full 4x16 register blocks
+        // 각 워커가 완전한 4x16 레지스터 블록을 실행할 수 있도록 4개 행 단위로 분할 처리
         let rows_per_chunk = 4;
         let chunk_elems = rows_per_chunk * n;
         c.par_chunks_mut(chunk_elems).enumerate().for_each(|(chunk_idx, c_chunk)| {
@@ -62,7 +63,7 @@ pub fn cpu_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32
     c
 }
 
-/// Single-threaded matrix multiplication into a newly allocated buffer (used inside outer parallel loops).
+/// 단일 스레드로 새 버퍼에 행렬 곱셈을 수행합니다 (바깥쪽 병렬 루프 내부에서 사용).
 #[inline]
 pub fn cpu_matmul_serial(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut c = vec![0.0f32; m * n];
@@ -72,7 +73,7 @@ pub fn cpu_matmul_serial(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> 
     c
 }
 
-/// Single-threaded matrix multiplication writing directly into an existing slice `c` (zeroes `c` first).
+/// 사전에 할당된 `c` 슬라이스에 직접 행렬 곱 결과를 쓰는 단일 스레드 함수 (먼저 0으로 채움).
 #[inline]
 pub fn cpu_matmul_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     c.fill(0.0);
@@ -81,7 +82,7 @@ pub fn cpu_matmul_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, 
     }
 }
 
-/// Single-threaded matrix multiplication accumulating into `c` (`C += A @ B`).
+/// 기존 `c` 슬라이스에 행렬 곱셈 결과를 누적(`C += A @ B`)하는 단일 스레드 함수.
 #[inline]
 pub fn cpu_matmul_add_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     if m > 0 && n > 0 && k > 0 {
@@ -89,8 +90,7 @@ pub fn cpu_matmul_add_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usi
     }
 }
 
-/// Single-threaded transposed-B matrix multiplication accumulating into `c` (`C[m, n] += A[m, k] @ B[n, k]^T`).
-/// Avoids transposing `B` when `B` is already stored as `[n, k]` with contiguous `k`.
+/// `B`가 `[n, k]` 형태로 저장되어 있을 때 전치하지 않고 직접 누적하는 단일 스레드 행렬 곱 (`C[m, n] += A[m, k] @ B[n, k]^T`).
 #[inline]
 pub fn cpu_matmul_nt_add_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     if m == 0 || n == 0 || k == 0 {
@@ -105,6 +105,7 @@ pub fn cpu_matmul_nt_add_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: 
             return;
         }
     }
+    // 스칼라 폴백 경로
     for i in 0..m {
         let arow = &a[i * k..(i + 1) * k];
         let crow = &mut c[i * n..(i + 1) * n];
@@ -119,6 +120,7 @@ pub fn cpu_matmul_nt_add_into(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: 
     }
 }
 
+/// AVX2 + FMA 명령어를 사용한 `matmul_nt` SIMD 마이크로커널
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn matmul_nt_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
@@ -164,12 +166,13 @@ unsafe fn matmul_nt_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize
     }
 }
 
+/// 런타임 하드웨어 기능을 확인하여 최적화된 행렬 곱 커널을 호출합니다.
 #[inline]
 fn matmul_kernel(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: avx2 and fma features are verified at runtime.
+            // SAFETY: avx2 및 fma 지원 여부를 런타임에 확인 완료
             unsafe {
                 matmul_avx2(a, b, c, m, k, n);
             }
@@ -179,6 +182,7 @@ fn matmul_kernel(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usi
     matmul_scalar(a, b, c, m, k, n);
 }
 
+/// 캐시 타일링(`KC = 128`)과 4행 언롤링이 적용된 스칼라 행렬 곱셈 폴백 함수
 fn matmul_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     const KC: usize = 128;
     let mut p0 = 0;
@@ -224,6 +228,7 @@ fn matmul_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usi
     }
 }
 
+/// 4x16 YMM 레지스터 블록 및 캐시 블록화(`KC = 256`)가 적용된 AVX2+FMA 마이크로커널
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn matmul_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
@@ -242,10 +247,10 @@ unsafe fn matmul_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n
         let p1 = (p0 + KC).min(k);
         let mut i = 0;
 
-        // 4-row register-blocked microkernel
+        // 4행 레지스터 블록 마이크로커널
         while i + 4 <= m {
             let mut j = 0;
-            // 4 x 16 register block (8 YMM accumulator registers)
+            // 4 x 16 레지스터 블록 (8개의 YMM 누적 레지스터)
             while j + 16 <= n {
                 let c0_ptr = c_ptr.add(i * n + j);
                 let c1_ptr = c_ptr.add((i + 1) * n + j);
@@ -295,7 +300,7 @@ unsafe fn matmul_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n
                 j += 16;
             }
 
-            // 4 x 8 remainder block
+            // 4 x 8 나머지 블록
             if j + 8 <= n {
                 let c0_ptr = c_ptr.add(i * n + j);
                 let c1_ptr = c_ptr.add((i + 1) * n + j);
@@ -327,7 +332,7 @@ unsafe fn matmul_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n
                 j += 8;
             }
 
-            // Scalar column tail for the 4 rows
+            // 4개 행에 대한 스칼라 열 꼬리(tail) 처리
             if j < n {
                 for p in p0..p1 {
                     let a0 = *a_ptr.add(i * k + p);
@@ -347,7 +352,7 @@ unsafe fn matmul_avx2(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n
             i += 4;
         }
 
-        // Remaining rows (1..3 rows)
+        // 남은 행 처리 (1..3개 행)
         while i < m {
             let mut j = 0;
             while j + 16 <= n {

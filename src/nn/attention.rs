@@ -1,10 +1,10 @@
-//! Attention and Transformer blocks.
+//! 어텐션 및 트랜스포머(Transformer) 빌딩 블록 모듈.
 
 use super::{prefixed, Dropout, LayerNorm, Linear, Module};
 use crate::autograd::no_grad;
 use crate::tensor::Tensor;
 
-/// Rotary position embedding with split-half pairs, as used by Llama.
+/// LLaMA 등에서 사용하는 분할 반전 쌍(Split-half pairs) 방식의 회전 위치 임베딩 (RoPE: Rotary Position Embedding).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RotaryEmbedding {
     dim: usize,
@@ -12,14 +12,15 @@ pub struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
+    /// 지정된 헤드 차원과 기저값(base, 일반적으로 10000.0)으로 새 RoPE 임베딩을 생성합니다.
     pub fn new(dim: usize, base: f32) -> Self {
         assert!(dim > 0 && dim.is_multiple_of(2), "RoPE requires a positive even head dimension");
         assert!(base.is_finite() && base > 0.0, "RoPE base must be finite and positive");
         Self { dim, base }
     }
 
-    /// Rotate `[..., sequence, head_dim]` starting at an absolute token position.
-    /// This operation preserves device placement and supports backpropagation.
+    /// 절대 토큰 위치 오프셋(`position_offset`)을 기준으로 `[..., sequence, head_dim]` 텐서를 회전 변환합니다.
+    /// 디바이스 위치를 보존하며 역전파를 완벽히 지원합니다.
     pub fn forward(&self, x: &Tensor, position_offset: usize) -> Tensor {
         assert!(x.ndim() >= 2, "RoPE expects at least two dimensions");
         assert_eq!(x.size(-1), self.dim, "RoPE head dimension mismatch");
@@ -58,8 +59,8 @@ impl RotaryEmbedding {
     }
 }
 
-/// Per-layer inference cache. Use a separate cache for each attention layer and
-/// call [`clear`](Self::clear) before starting a new sequence or changing weights.
+/// 레이어별 추론 가속용 Key-Value 캐시 (KV Cache).
+/// 어텐션 레이어마다 별도의 캐시를 사용해야 하며, 새로운 시퀀스 생성을 시작하거나 모델 가중치를 바꿀 때는 [`clear`](Self::clear)를 호출해야 합니다.
 #[derive(Default)]
 pub struct KvCache {
     keys: Option<Tensor>,
@@ -71,23 +72,27 @@ pub struct KvCache {
 }
 
 impl KvCache {
+    /// 비어 있는 새 KV 캐시 인스턴스를 생성합니다.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Number of cached token positions (independent of batch size).
+    /// 현재 캐시된 토큰 시퀀스 길이(토큰 위치 개수)를 반환합니다.
     pub fn len(&self) -> usize {
         self.keys.as_ref().map_or(0, |k| k.shape()[1])
     }
 
+    /// 캐시가 비어 있는지 확인합니다.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// 캐시를 완전히 비우고 초기화합니다.
     pub fn clear(&mut self) {
         *self = Self::default();
     }
 
+    /// 이전 K/V 텐서 뒤에 새로 생성된 현재 토큰의 K/V 텐서를 덧붙입니다.
     fn append(previous: Option<&Tensor>, current: &Tensor) -> Tensor {
         let Some(previous) = previous else { return current.clone() };
         assert_eq!(previous.device(), current.device(), "KV cache device changed; clear the cache first");
@@ -96,7 +101,6 @@ impl KvCache {
         assert_eq!(current.shape(), &[bh, t, dim], "KV cache shape changed; clear the cache first");
         let old = previous.data();
         let new = current.data();
-        // shortcut: appends copy previous K/V, use preallocated storage for long-context decoding.
         let mut data = Vec::with_capacity(bh * (old_t + t) * dim);
         for head in 0..bh {
             data.extend_from_slice(&old[head * old_t * dim..(head + 1) * old_t * dim]);
@@ -106,9 +110,9 @@ impl KvCache {
     }
 }
 
-/// Multi-head scaled dot-product self-attention.
+/// 다중 헤드 스케일드 닷 프로덕트 셀프 어텐션 (Multi-Head Attention: MHA).
 ///
-/// Input / output: `[batch, seq_len, d_model]`.
+/// 입력 / 출력 형태: `[batch, seq_len, d_model]`.
 pub struct MultiHeadAttention {
     pub wq: Linear,
     pub wk: Linear,
@@ -116,12 +120,13 @@ pub struct MultiHeadAttention {
     pub wo: Linear,
     pub heads: usize,
     pub d_model: usize,
-    /// Apply a causal (look-ahead) mask, as in GPT-style decoders.
+    /// GPT 스타일 디코더처럼 미래 토큰 참조를 차단하는 인과적(causal / look-ahead) 마스크 적용 여부
     pub causal: bool,
     rotary: Option<RotaryEmbedding>,
 }
 
 impl MultiHeadAttention {
+    /// 임베딩 차원 `d_model`과 어텐션 헤드 개수 `heads`로 새 어텐션 모듈을 생성합니다.
     pub fn new(d_model: usize, heads: usize) -> Self {
         assert!(d_model > 0 && heads > 0, "d_model and heads must be positive");
         assert_eq!(d_model % heads, 0, "d_model must be divisible by heads");
@@ -137,12 +142,13 @@ impl MultiHeadAttention {
         }
     }
 
+    /// 인과적(Causal) 마스킹 사용 여부를 설정합니다 (빌더 패턴).
     pub fn causal(mut self, c: bool) -> Self {
         self.causal = c;
         self
     }
 
-    /// Enable split-half RoPE for queries and keys; `10_000.0` is a common base.
+    /// Query 및 Key에 적용할 RoPE(Rotary Position Embedding)를 활성화합니다 (`10000.0`이 일반적인 base 값).
     pub fn rope(mut self, base: f32) -> Self {
         self.rotary = Some(RotaryEmbedding::new(self.d_model / self.heads, base));
         self
@@ -155,6 +161,7 @@ impl MultiHeadAttention {
         assert!(x.shape()[0] > 0 && x.shape()[1] > 0, "attention requires a nonempty batch and sequence");
     }
 
+    /// 입력을 Q, K, V 헤드로 투영하고 필요한 경우 RoPE를 적용합니다.
     fn projections(&self, x: &Tensor, position_offset: usize) -> (Tensor, Tensor, Tensor) {
         let (b, t, d) = (x.shape()[0], x.shape()[1], x.shape()[2]);
         let (h, dh) = (self.heads, d / self.heads);
@@ -169,6 +176,7 @@ impl MultiHeadAttention {
         (q, k, v)
     }
 
+    /// 스케일드 닷 프로덕트 어텐션 점수를 계산하고 Softmax 및 가중치 합을 수행합니다.
     fn attend(&self, x: &Tensor, q: &Tensor, k: &Tensor, v: &Tensor, position_offset: usize) -> Tensor {
         let (b, t, d) = (x.shape()[0], x.shape()[1], self.d_model);
         let (h, dh, key_t) = (self.heads, d / self.heads, k.shape()[1]);
@@ -187,9 +195,8 @@ impl MultiHeadAttention {
         self.wo.forward(&merged)
     }
 
-    /// Inference-only causal attention over newly supplied tokens. Previously
-    /// projected K/V are reused; positions advance automatically by cache length.
-    /// Clear the cache after updating model weights or starting a new sequence.
+    /// 추론 전용: 새로운 입력 토큰에 대해 기존 KV 캐시를 재활용하여 인과적 어텐션을 고속 수행합니다.
+    /// 토큰 위치는 캐시 길이에 맞춰 자동으로 누적 전진합니다.
     pub fn forward_cached(&self, x: &Tensor, cache: &mut KvCache) -> Tensor {
         self.validate_input(x);
         assert!(self.causal, "KV caching requires causal attention");
@@ -237,8 +244,8 @@ impl Module for MultiHeadAttention {
     }
 }
 
-/// Pre-norm Transformer encoder block:
-/// `x + MHA(LN(x))` followed by `x + FFN(LN(x))` with GELU.
+/// Pre-LayerNorm 구조의 트랜스포머 인코더 블록:
+/// `x + Dropout(MHA(LN1(x)))` 및 `x + Dropout(FFN(LN2(x)))` (GELU 활성화 함수 적용).
 pub struct TransformerEncoderLayer {
     pub attn: MultiHeadAttention,
     pub ln1: LayerNorm,
@@ -249,6 +256,7 @@ pub struct TransformerEncoderLayer {
 }
 
 impl TransformerEncoderLayer {
+    /// 새 트랜스포머 인코더 블록을 생성합니다.
     pub fn new(d_model: usize, heads: usize, ff_dim: usize, dropout: f32) -> Self {
         TransformerEncoderLayer {
             attn: MultiHeadAttention::new(d_model, heads),
@@ -260,17 +268,19 @@ impl TransformerEncoderLayer {
         }
     }
 
+    /// 인과적(Causal) 마스킹 사용 여부를 설정합니다.
     pub fn causal(mut self, c: bool) -> Self {
         self.attn.causal = c;
         self
     }
 
+    /// RoPE 위치 임베딩을 활성화합니다.
     pub fn rope(mut self, base: f32) -> Self {
         self.attn = self.attn.rope(base);
         self
     }
 
-    /// Cached inference with dropout disabled. Use one cache per layer.
+    /// 드롭아웃을 끄고 KV 캐시를 활용하여 고속 추론을 수행합니다.
     pub fn forward_cached(&self, x: &Tensor, cache: &mut KvCache) -> Tensor {
         no_grad(|| {
             let a = self.attn.forward_cached(&self.ln1.forward(x), cache);

@@ -1,18 +1,18 @@
-//! Loss functions.
+//! 신경망 손실 함수(Loss functions) 구현 모듈.
 
 use crate::tensor::Tensor;
 
-/// Mean squared error.
+/// 평균 제곱 오차 (Mean Squared Error: MSE) 손실을 계산합니다.
 pub fn mse_loss(pred: &Tensor, target: &Tensor) -> Tensor {
     pred.sub(target).square().mean()
 }
 
-/// Mean absolute error.
+/// 평균 절대 오차 (Mean Absolute Error: L1) 손실을 계산합니다.
 pub fn l1_loss(pred: &Tensor, target: &Tensor) -> Tensor {
     pred.sub(target).abs().mean()
 }
 
-/// Smooth L1 / Huber loss.
+/// Smooth L1 / Huber 손실 함수: 오차가 `delta` 이하이면 제곱 오차를, 크면 선형 오차를 적용하여 이상치에 강건합니다.
 pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Tensor {
     let diff = pred.sub(target).to_vec();
     let n = diff.len().max(1) as f32;
@@ -35,12 +35,12 @@ pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Tensor {
     )
 }
 
-/// Cross-entropy for class logits `[N, C]` and integer targets `[N]`.
+/// 로짓 `[N, C]`과 정수 정답 라벨 `[N]` 간의 교차 엔트로피(Cross-Entropy) 손실을 계산합니다.
 pub fn cross_entropy(logits: &Tensor, targets: &Tensor) -> Tensor {
     cross_entropy_smooth(logits, targets, 0.0)
 }
 
-/// Cross-entropy with label smoothing `eps` (fused, numerically stable).
+/// 레이블 스무딩(Label Smoothing: `eps`)이 적용된 수치적으로 안정적인 융합 교차 엔트로피 손실 함수.
 pub fn cross_entropy_smooth(logits: &Tensor, targets: &Tensor, eps: f32) -> Tensor {
     assert_eq!(logits.ndim(), 2, "cross_entropy expects logits [N, C], got {:?}", logits.shape());
     let (n, c) = (logits.shape()[0], logits.shape()[1]);
@@ -85,7 +85,7 @@ pub fn cross_entropy_smooth(logits: &Tensor, targets: &Tensor, eps: f32) -> Tens
     )
 }
 
-/// Negative log-likelihood on log-probabilities `[N, C]`.
+/// 로그 확률 텐서 `[N, C]`에 대한 음의 로그 우도(Negative Log-Likelihood: NLL) 손실을 계산합니다.
 pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
     let (n, c) = (log_probs.shape()[0], log_probs.shape()[1]);
     let tg: Vec<usize> = targets.data().iter().map(|&v| v as usize).collect();
@@ -108,7 +108,7 @@ pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Tensor {
     )
 }
 
-/// Binary cross-entropy on raw logits (sigmoid fused for stability).
+/// 원시 로짓에 대한 이진 교차 엔트로피(Binary Cross-Entropy with Logits) 손실 (수치적 안정성을 위해 시그모이드와 융합).
 pub fn bce_with_logits(logits: &Tensor, targets: &Tensor) -> Tensor {
     assert_eq!(logits.shape(), targets.shape(), "bce_with_logits: shape mismatch");
     let x = logits.to_vec();
@@ -127,7 +127,7 @@ pub fn bce_with_logits(logits: &Tensor, targets: &Tensor) -> Tensor {
     )
 }
 
-/// Classification accuracy of logits `[N, C]` against integer targets `[N]`.
+/// 예측 로짓 `[N, C]`과 정수 정답 라벨 `[N]` 간의 분류 정확도(Accuracy)를 계산합니다.
 pub fn accuracy(logits: &Tensor, targets: &Tensor) -> f32 {
     let pred = logits.argmax();
     let tg = targets.data();

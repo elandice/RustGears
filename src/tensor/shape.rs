@@ -1,6 +1,6 @@
-//! Shape utilities: strides, broadcasting and permutation.
+//! 텐서 형태(Shape) 유틸리티: 스트라이드(stride), 브로드캐스팅(broadcasting), 차원 순열 치환(permutation).
 
-/// Row-major (C-contiguous) strides.
+/// 행 우선(Row-major, C-contiguous) 방식의 차원별 스트라이드(stride)를 계산합니다.
 pub fn strides(shape: &[usize]) -> Vec<usize> {
     let mut s = vec![1; shape.len()];
     for i in (0..shape.len().saturating_sub(1)).rev() {
@@ -9,7 +9,7 @@ pub fn strides(shape: &[usize]) -> Vec<usize> {
     s
 }
 
-/// NumPy-style broadcast of two shapes.
+/// NumPy 스타일 브로드캐스팅 규칙에 따라 두 텐서 형상(`a`, `b`)을 브로드캐스팅한 결과 형상을 계산합니다.
 pub fn broadcast_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
     let n = a.len().max(b.len());
     let mut out = vec![0; n];
@@ -29,13 +29,13 @@ pub fn broadcast_shape(a: &[usize], b: &[usize]) -> Result<Vec<usize>, String> {
     Ok(out)
 }
 
-/// For every element of `out_shape`, the linear index into a tensor of
-/// `src_shape` that broadcasts to it.
+/// `src_shape`를 `out_shape`로 브로드캐스트할 때,
+/// 출력의 각 원소가 읽어야 할 원본 데이터의 1차원 선형 인덱스 맵을 생성합니다.
 pub fn broadcast_index_map(src: &[usize], out: &[usize]) -> Vec<usize> {
     let n = out.len();
     let off = n - src.len();
     let sstr = strides(src);
-    // effective stride per output dim (0 where broadcast)
+    // 브로드캐스트된 차원은 스트라이드가 0이 됨
     let eff: Vec<usize> = (0..n)
         .map(|i| if i < off || src[i - off] == 1 { 0 } else { sstr[i - off] })
         .collect();
@@ -45,7 +45,7 @@ pub fn broadcast_index_map(src: &[usize], out: &[usize]) -> Vec<usize> {
     let mut cur = 0usize;
     for _ in 0..total {
         map.push(cur);
-        // increment multi-index
+        // 다차원 인덱스 1 증가
         for d in (0..n).rev() {
             idx[d] += 1;
             cur += eff[d];
@@ -59,7 +59,7 @@ pub fn broadcast_index_map(src: &[usize], out: &[usize]) -> Vec<usize> {
     map
 }
 
-/// Sum a gradient of shape `out` down to `src` using a broadcast index map.
+/// 브로드캐스트 인덱스 맵을 역으로 순회하여 출력 기울기를 원래 입력 크기(`src_numel`)로 축소 합산(reduce sum)합니다.
 pub fn reduce_by_map(grad: &[f32], map: &[usize], src_numel: usize) -> Vec<f32> {
     let mut g = vec![0.0; src_numel];
     for (v, &i) in grad.iter().zip(map) {
@@ -68,7 +68,7 @@ pub fn reduce_by_map(grad: &[f32], map: &[usize], src_numel: usize) -> Vec<f32> 
     g
 }
 
-/// Permute dimensions of a contiguous buffer.
+/// 연속된 메모리 버퍼의 차원 축 순서를 주어진 순열(`perm`)에 따라 재배치합니다.
 pub fn permute(data: &[f32], shape: &[usize], perm: &[usize]) -> (Vec<f32>, Vec<usize>) {
     let n = shape.len();
     assert_eq!(perm.len(), n, "permute: wrong number of dims");
@@ -94,14 +94,14 @@ pub fn permute(data: &[f32], shape: &[usize], perm: &[usize]) -> (Vec<f32>, Vec<
     (out, out_shape)
 }
 
-/// Transpose a row-major `rows x cols` matrix into a new vector.
+/// 행 우선(Row-major) `rows x cols` 행렬을 전치(Transpose)하여 새로운 벡터로 반환합니다.
 pub fn transpose2d(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut out = vec![0.0; rows * cols];
     transpose2d_into(data, rows, cols, &mut out);
     out
 }
 
-/// Cache-tiled transpose of a row-major `rows x cols` matrix into `out`.
+/// 캐시 지역성(Tile: 32x32)을 고려하여 `rows x cols` 행렬을 `out` 버퍼에 고속으로 전치합니다.
 pub fn transpose2d_into(data: &[f32], rows: usize, cols: usize, out: &mut [f32]) {
     const TILE: usize = 32;
     let mut r0 = 0;
@@ -122,7 +122,7 @@ pub fn transpose2d_into(data: &[f32], rows: usize, cols: usize, out: &mut [f32])
     }
 }
 
-/// Split a shape around `dim` into (outer, dim_size, inner).
+/// 형상을 특정 차원(`dim`)을 기준으로 `(outer, dim_size, inner)` 3개 크기로 분할합니다.
 pub fn split_at_dim(shape: &[usize], dim: usize) -> (usize, usize, usize) {
     let outer: usize = shape[..dim].iter().product();
     let inner: usize = shape[dim + 1..].iter().product();

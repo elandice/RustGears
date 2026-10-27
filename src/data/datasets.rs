@@ -1,10 +1,10 @@
-//! Synthetic datasets for experiments and examples.
+//! 실험 및 예제 실행을 위한 합성(Synthetic) 데이터셋 생성 모듈.
 
 use super::TensorDataset;
 use crate::rng::Rng;
 use crate::tensor::Tensor;
 
-/// Interleaved spirals: `classes` arms with `n_per_class` 2-D points each.
+/// 다중 나선형(Interleaved spirals) 2D 분류 데이터셋을 생성합니다 (`classes`개의 팔, 각 팔마다 `n_per_class`개의 2D 점).
 pub fn spirals(n_per_class: usize, classes: usize, noise: f32, seed: u64) -> TensorDataset {
     let mut rng = Rng::new(seed);
     let mut x = Vec::new();
@@ -22,7 +22,7 @@ pub fn spirals(n_per_class: usize, classes: usize, noise: f32, seed: u64) -> Ten
     TensorDataset::new(&Tensor::from_vec(x, &[n, 2]), &Tensor::from_vec(y, &[n]))
 }
 
-/// Gaussian blobs in `dim` dimensions.
+/// `dim` 차원의 가우시안 블롭(군집) 데이터셋을 생성합니다.
 pub fn blobs(n_per_class: usize, classes: usize, dim: usize, spread: f32, seed: u64) -> TensorDataset {
     let mut rng = Rng::new(seed);
     let centers: Vec<Vec<f32>> = (0..classes).map(|_| (0..dim).map(|_| rng.uniform_range(-5.0, 5.0)).collect()).collect();
@@ -40,7 +40,7 @@ pub fn blobs(n_per_class: usize, classes: usize, dim: usize, spread: f32, seed: 
     TensorDataset::new(&Tensor::from_vec(x, &[n, dim]), &Tensor::from_vec(y, &[n]))
 }
 
-/// Noisy regression data `y = sin(x) + 0.1 x^2 + noise`, `x in [-3, 3]`.
+/// 노이즈가 포함된 1차원 비선형 사인 회귀 데이터셋을 생성합니다 (`y = sin(x) + 0.1 x^2 + noise`, `x in [-3, 3]`).
 pub fn sine_regression(n: usize, noise: f32, seed: u64) -> TensorDataset {
     let mut rng = Rng::new(seed);
     let mut x = Vec::with_capacity(n);
@@ -53,8 +53,7 @@ pub fn sine_regression(n: usize, noise: f32, seed: u64) -> TensorDataset {
     TensorDataset::new(&Tensor::from_vec(x, &[n, 1]), &Tensor::from_vec(y, &[n, 1]))
 }
 
-/// Tiny image dataset `[N, 1, size, size]` with 4 classes of strokes:
-/// 0 = horizontal, 1 = vertical, 2 = diagonal "\", 3 = anti-diagonal "/".
+/// 4가지 선 획(0 = 가로선, 1 = 세로선, 2 = 대각선 `\`, 3 = 반대각선 `/`)을 갖는 소형 합성 이미지 데이터셋 `[N, 1, size, size]`을 생성합니다.
 pub fn stroke_images(n: usize, size: usize, noise: f32, seed: u64) -> TensorDataset {
     let mut rng = Rng::new(seed);
     let mut x = Vec::with_capacity(n * size * size);
@@ -86,8 +85,7 @@ pub fn stroke_images(n: usize, size: usize, noise: f32, seed: u64) -> TensorData
     TensorDataset::new(&Tensor::from_vec(x, &[n, 1, size, size]), &Tensor::from_vec(y, &[n]))
 }
 
-/// Sequence task for Transformers: input is a random token sequence, target is
-/// the same sequence sorted ascending (`[N, T]` -> `[N, T]`).
+/// 트랜스포머 학습용 시퀀스 정렬 과제: 무작위 정수 토큰 입력에 대해 오름차순으로 정렬된 시퀀스를 타깃으로 생성합니다 (`[N, T]` -> `[N, T]`).
 pub fn sort_sequences(n: usize, seq_len: usize, vocab: usize, seed: u64) -> TensorDataset {
     let mut rng = Rng::new(seed);
     let mut x = Vec::with_capacity(n * seq_len);

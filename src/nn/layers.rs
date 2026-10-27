@@ -1,4 +1,4 @@
-//! Core layers: Linear, Conv2d, pooling, activations, dropout, embedding.
+//! 핵심 신경망 레이어 모듈: Linear, Conv2d, ConvTranspose2d, 풀링, 활성화 함수, 드롭아웃, 임베딩, SwiGLU.
 
 use super::{init, Module};
 use crate::inference::{Activation, LayerSpec};
@@ -7,18 +7,23 @@ use crate::tensor::Tensor;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ----------------------------------------------------------------------
-// Linear
+// 선형 계층 (Linear)
 // ----------------------------------------------------------------------
 
-/// Fully connected layer `y = x W + b` (`W: [in, out]`).
+/// 완전 연결 계층 (Fully Connected / Dense Layer): `y = x W + b` (`W: [in, out]`).
 pub struct Linear {
+    /// 가중치 행렬 (`[in_features, out_features]`)
     pub weight: Tensor,
+    /// 편향 벡터 (`[out_features]`)
     pub bias: Option<Tensor>,
+    /// 입력 특징 차원 수
     pub in_features: usize,
+    /// 출력 특징 차원 수
     pub out_features: usize,
 }
 
 impl Linear {
+    /// Kaiming 균등 초기화 가중치와 균등 초기화 편향을 가진 Linear 레이어를 생성합니다.
     pub fn new(in_features: usize, out_features: usize) -> Self {
         Linear {
             weight: init::kaiming_uniform(&[in_features, out_features], in_features).requires_grad_(true),
@@ -28,6 +33,7 @@ impl Linear {
         }
     }
 
+    /// 편향(bias)이 없는 Linear 레이어를 생성합니다.
     pub fn no_bias(in_features: usize, out_features: usize) -> Self {
         let mut l = Self::new(in_features, out_features);
         l.bias = None;
@@ -76,21 +82,29 @@ impl Module for Linear {
 }
 
 // ----------------------------------------------------------------------
-// Conv2d
+// 2차원 합성곱 (Conv2d)
 // ----------------------------------------------------------------------
 
-/// 2-D convolution over `[N, C, H, W]` inputs (square kernels).
+/// 4차원 이미지/특징 맵 입력(`[N, C, H, W]`)을 위한 2차원 공간 합성곱(Convolution) 레이어 (정사각형 커널).
 pub struct Conv2d {
+    /// 합성곱 커널 가중치 (`[out_channels, in_channels, k, k]`)
     pub weight: Tensor,
+    /// 채널별 편향 (`[out_channels]`)
     pub bias: Tensor,
+    /// 입력 채널 수
     pub in_channels: usize,
+    /// 출력 채널 수
     pub out_channels: usize,
+    /// 커널 크기 (한 변의 길이)
     pub kernel_size: usize,
+    /// 스트라이드 (보폭)
     pub stride: usize,
+    /// 패딩 크기
     pub padding: usize,
 }
 
 impl Conv2d {
+    /// 기본 스트라이드 1, 패딩 0인 Conv2d 레이어를 생성합니다.
     pub fn new(in_channels: usize, out_channels: usize, kernel_size: usize) -> Self {
         let fan_in = in_channels * kernel_size * kernel_size;
         Conv2d {
@@ -104,11 +118,13 @@ impl Conv2d {
         }
     }
 
+    /// 스트라이드 크기를 설정합니다 (빌더 패턴).
     pub fn stride(mut self, s: usize) -> Self {
         self.stride = s;
         self
     }
 
+    /// 패딩 크기를 설정합니다 (빌더 패턴).
     pub fn padding(mut self, p: usize) -> Self {
         self.padding = p;
         self
@@ -146,11 +162,11 @@ impl Module for Conv2d {
 }
 
 // ----------------------------------------------------------------------
-// Pooling / reshaping
+// 전치 합성곱 및 풀링/형상 변환
 // ----------------------------------------------------------------------
 
-/// Transposed 2-D convolution on `[N,C,H,W]` (square kernels, one group).
-/// Weights use PyTorch's `[in_channels,out_channels,k,k]` layout.
+/// 4차원 `[N, C, H, W]` 입력에 대한 2차원 전치 합성곱(Transposed Convolution / Deconvolution) 레이어.
+/// 가중치는 PyTorch와 동일한 `[in_channels, out_channels, k, k]` 배치를 따릅니다.
 pub struct ConvTranspose2d {
     pub weight: Tensor,
     pub bias: Tensor,
@@ -163,6 +179,7 @@ pub struct ConvTranspose2d {
 }
 
 impl ConvTranspose2d {
+    /// 새 ConvTranspose2d 레이어를 생성합니다.
     pub fn new(in_channels: usize, out_channels: usize, kernel_size: usize) -> Self {
         assert!(in_channels > 0 && out_channels > 0 && kernel_size > 0, "ConvTranspose2d dimensions must be positive");
         let fan_in = out_channels * kernel_size * kernel_size;
@@ -178,17 +195,20 @@ impl ConvTranspose2d {
         }
     }
 
+    /// 스트라이드를 설정합니다.
     pub fn stride(mut self, stride: usize) -> Self {
         assert!(stride > 0, "ConvTranspose2d stride must be positive");
         self.stride = stride;
         self
     }
 
+    /// 패딩을 설정합니다.
     pub fn padding(mut self, padding: usize) -> Self {
         self.padding = padding;
         self
     }
 
+    /// 출력 패딩(output_padding)을 설정합니다.
     pub fn output_padding(mut self, output_padding: usize) -> Self {
         self.output_padding = output_padding;
         self
@@ -210,7 +230,7 @@ impl Module for ConvTranspose2d {
     }
 }
 
-/// Pool each channel to a fixed spatial resolution, including global `(1,1)` pooling.
+/// 채널별로 고정된 공간 해상도 `(height, width)`로 풀링을 수행하는 적응형 2D 평균 풀링 레이어 (글로벌 `(1, 1)` 풀링 지원).
 pub struct AdaptiveAvgPool2d {
     pub output_size: (usize, usize),
 }
@@ -232,12 +252,14 @@ impl Module for AdaptiveAvgPool2d {
     }
 }
 
+/// 2차원 공간 최대 풀링(Max Pooling) 레이어.
 pub struct MaxPool2d {
     pub kernel: usize,
     pub stride: usize,
 }
 
 impl MaxPool2d {
+    /// 커널 크기와 동일한 스트라이드로 MaxPool2d 레이어를 생성합니다.
     pub fn new(kernel: usize) -> Self {
         MaxPool2d { kernel, stride: kernel }
     }
@@ -255,7 +277,7 @@ impl Module for MaxPool2d {
     }
 }
 
-/// Flatten everything but the batch dimension.
+/// 배치 차원(0번 축)을 제외한 모든 차원을 평탄화(Flatten)하는 레이어.
 pub struct Flatten;
 
 impl Module for Flatten {
@@ -270,6 +292,7 @@ impl Module for Flatten {
     }
 }
 
+/// 입력을 아무런 변형 없이 그대로 반환하는 항등(Identity) 레이어.
 pub struct Identity;
 
 impl Module for Identity {
@@ -285,11 +308,12 @@ impl Module for Identity {
 }
 
 // ----------------------------------------------------------------------
-// Activations
+// 활성화 함수 (Activations)
 // ----------------------------------------------------------------------
 
 macro_rules! activation {
-    ($name:ident, $method:ident, $act:expr) => {
+    ($name:ident, $method:ident, $act:expr, $doc:expr) => {
+        #[doc = $doc]
         pub struct $name;
         impl Module for $name {
             fn forward(&self, x: &Tensor) -> Tensor {
@@ -305,12 +329,12 @@ macro_rules! activation {
     };
 }
 
-activation!(Relu, relu, Activation::Relu);
-activation!(Sigmoid, sigmoid, Activation::Sigmoid);
-activation!(Tanh, tanh, Activation::Tanh);
-activation!(Gelu, gelu, Activation::Gelu);
+activation!(Relu, relu, Activation::Relu, "ReLU 활성화 함수 레이어 (`max(0, x)`).");
+activation!(Sigmoid, sigmoid, Activation::Sigmoid, "시그모이드 활성화 함수 레이어 (`1 / (1 + e^-x)`).");
+activation!(Tanh, tanh, Activation::Tanh, "쌍곡탄젠트 활성화 함수 레이어 (`tanh(x)`).");
+activation!(Gelu, gelu, Activation::Gelu, "GELU 활성화 함수 레이어.");
 
-/// SiLU (Sigmoid Linear Unit, also known as Swish): `y = x * sigmoid(x)`.
+/// SiLU (Sigmoid Linear Unit, Swish라고도 부름): `y = x * sigmoid(x)`.
 pub struct Silu;
 
 impl Module for Silu {
@@ -322,6 +346,7 @@ impl Module for Silu {
     }
 }
 
+/// 음수 입력에 대해 지정된 기울기(slope)를 적용하는 Leaky ReLU 활성화 함수 레이어.
 pub struct LeakyRelu(pub f32);
 
 impl Module for LeakyRelu {
@@ -336,7 +361,7 @@ impl Module for LeakyRelu {
     }
 }
 
-/// Softmax over the last dimension.
+/// 마지막 차원에 대해 확률 분포를 계산하는 소프트맥스(Softmax) 레이어.
 pub struct Softmax;
 
 impl Module for Softmax {
@@ -344,7 +369,7 @@ impl Module for Softmax {
         x.softmax(-1)
     }
     fn name(&self) -> String {
-        "Softmax(dim=-1)".into()
+        "Softmax".into()
     }
     fn export(&self) -> Result<Vec<LayerSpec>, String> {
         Ok(vec![LayerSpec::Softmax])
@@ -352,10 +377,10 @@ impl Module for Softmax {
 }
 
 // ----------------------------------------------------------------------
-// Dropout
+// 드롭아웃 (Dropout)
 // ----------------------------------------------------------------------
 
-/// Inverted dropout: zeroes activations with probability `p` during training.
+/// 역 드롭아웃(Inverted Dropout): 학습 도중 뉴런 활성화를 `p`의 확률로 무작위 0으로 만들고 나머지 뉴런을 `1/(1-p)`로 스케일링합니다.
 pub struct Dropout {
     pub p: f32,
     training: AtomicBool,
@@ -384,18 +409,21 @@ impl Module for Dropout {
         self.training.store(t, Ordering::Relaxed);
     }
     fn export(&self) -> Result<Vec<LayerSpec>, String> {
-        Ok(vec![]) // identity at inference time
+        Ok(vec![]) // 추론 시에는 아무런 연산도 하지 않음(Identity)
     }
 }
 
 // ----------------------------------------------------------------------
-// Embedding
+// 임베딩 (Embedding)
 // ----------------------------------------------------------------------
 
-/// Lookup table mapping integer ids (stored as f32) to dense vectors.
+/// 정수 토큰 ID를 밀집 벡터(Dense vector)로 매핑하는 임베딩 룩업 테이블.
 pub struct Embedding {
+    /// 임베딩 가중치 텐서 (`[num_embeddings, dim]`)
     pub weight: Tensor,
+    /// 어휘 사전 크기 (고유 토큰 개수)
     pub num_embeddings: usize,
+    /// 임베딩 벡터 차원 수
     pub dim: usize,
 }
 
@@ -406,7 +434,7 @@ impl Embedding {
 }
 
 impl Module for Embedding {
-    /// `ids`: any shape of integer-valued floats -> `ids.shape + [dim]`.
+    /// `ids`: 임의 형태의 정수형 텐서 -> 결과 형태: `ids.shape + [dim]`.
     fn forward(&self, ids: &Tensor) -> Tensor {
         let idx: Vec<usize> = ids.data().iter().map(|&v| v as usize).collect();
         let (v, d) = (self.num_embeddings, self.dim);
@@ -447,10 +475,10 @@ impl Module for Embedding {
 }
 
 // ----------------------------------------------------------------------
-// SwiGLU Feed-Forward Network
+// SwiGLU 피드포워드 신경망
 // ----------------------------------------------------------------------
 
-/// SwiGLU Feed-Forward Network block widely adopted in modern Transformer architectures (e.g. LLaMA, PaLM):
+/// LLaMA, PaLM 등 최신 대형 언어 모델(LLM)에 널리 사용되는 SwiGLU 피드포워드 신경망 블록:
 /// `SwiGLU(x) = (SiLU(x * W_gate) * (x * W_up)) * W_down`.
 pub struct SwiGLU {
     pub gate: Linear,
@@ -462,6 +490,7 @@ pub struct SwiGLU {
 }
 
 impl SwiGLU {
+    /// 지정된 입력, 은닉, 출력 차원으로 새 SwiGLU 블록을 생성합니다.
     pub fn new(in_features: usize, hidden_features: usize, out_features: usize) -> Self {
         SwiGLU {
             gate: Linear::no_bias(in_features, hidden_features),

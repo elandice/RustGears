@@ -1,5 +1,4 @@
-//! Model state dicts (`RTSC` / Hugging Face Safetensors) and portable inference
-//! models (`RTIM`).
+//! 모델 상태 딕셔너리(`RTSC` / Hugging Face Safetensors) 및 이식 가능한 추론 모델(`RTIM`) 저장/로드.
 
 mod safetensors;
 pub use safetensors::{load_safetensors, read_safetensors, save_safetensors};
@@ -12,9 +11,13 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
+/// RTSC(RustGears State Checkpoint) 매직 바이트.
 const STATE_MAGIC: &[u8; 4] = b"RTSC";
+/// RTIM(RustGears Inference Model) 매직 바이트.
 const MODEL_MAGIC: &[u8; 4] = b"RTIM";
 
+/// 임시 파일을 작성한 뒤 대상 경로로 원자적(Atomic) 교체하여 저장합니다.
+/// 쓰기 도중 에러가 발생해도 기존 파일이 손상되지 않습니다.
 fn write_atomic(path: impl AsRef<Path>, write: impl FnOnce(&mut BufWriter<&File>) -> io::Result<()>) -> io::Result<()> {
     let path = path.as_ref();
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
@@ -28,26 +31,31 @@ fn write_atomic(path: impl AsRef<Path>, write: impl FnOnce(&mut BufWriter<&File>
     Ok(())
 }
 
+/// u32 정수를 리틀 엔디언으로 씁니다.
 fn write_u32(w: &mut impl Write, v: u32) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
+/// 리틀 엔디언 u32 정수를 읽습니다.
 fn read_u32(r: &mut impl Read) -> io::Result<u32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
     Ok(u32::from_le_bytes(b))
 }
 
+/// f32 부동소수점을 리틀 엔디언으로 씁니다.
 fn write_f32(w: &mut impl Write, v: f32) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
+/// 리틀 엔디언 f32 부동소수점을 읽습니다.
 fn read_f32(r: &mut impl Read) -> io::Result<f32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
     Ok(f32::from_le_bytes(b))
 }
 
+/// f32 슬라이스의 길이와 데이터를 연속으로 씁니다.
 fn write_f32_slice(w: &mut impl Write, v: &[f32]) -> io::Result<()> {
     write_u32(w, v.len() as u32)?;
     for &x in v {
@@ -56,6 +64,7 @@ fn write_f32_slice(w: &mut impl Write, v: &[f32]) -> io::Result<()> {
     Ok(())
 }
 
+/// 길이 접두사가 붙은 f32 벡터를 읽습니다.
 fn read_f32_vec(r: &mut impl Read) -> io::Result<Vec<f32>> {
     let n = read_u32(r)? as usize;
     let mut v = Vec::new();
@@ -65,8 +74,10 @@ fn read_f32_vec(r: &mut impl Read) -> io::Result<Vec<f32>> {
     Ok(v)
 }
 
-/// Save a module's `state_dict` (parameters + buffers) to a file.
-/// The `.safetensors` extension selects Safetensors; other paths use `RTSC`.
+/// 모듈의 `state_dict`(매개변수 및 버퍼)를 파일에 저장합니다.
+///
+/// 파일 확장자가 `.safetensors`인 경우 Hugging Face Safetensors 포맷으로 저장되며,
+/// 그 외의 경로는 네이티브 바이너리 포맷(`RTSC`)으로 저장됩니다.
 pub fn save_state_dict(module: &dyn Module, path: impl AsRef<Path>) -> io::Result<()> {
     if path.as_ref().extension().is_some_and(|ext| ext == "safetensors") {
         return save_safetensors(module, path);
@@ -89,7 +100,7 @@ pub fn save_state_dict(module: &dyn Module, path: impl AsRef<Path>) -> io::Resul
     })
 }
 
-/// Load `RTSC` or Safetensors weights into `module` by exact name and shape.
+/// 파일에서 `RTSC` 또는 Safetensors 가중치를 읽어와 일치하는 이름과 형태의 매개변수에 로드합니다.
 pub fn load_state_dict(module: &dyn Module, path: impl AsRef<Path>) -> io::Result<()> {
     let mut r = BufReader::new(File::open(path.as_ref())?);
     let mut magic = [0u8; 4];
@@ -124,13 +135,15 @@ pub fn load_state_dict(module: &dyn Module, path: impl AsRef<Path>) -> io::Resul
     apply_state_dict(module, &stored)
 }
 
+/// `InvalidData` 에러를 생성하는 헬퍼 함수.
 fn invalid_data(error: impl std::fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())
 }
 
+/// 로드된 텐서 맵의 유효성을 사전에 전수 검사한 뒤, 모듈의 가중치로 in-place 복사합니다.
 fn apply_state_dict(module: &dyn Module, stored: &HashMap<String, Tensor>) -> io::Result<()> {
     let state = module.state_dict();
-    // Validate the entire checkpoint before changing any live parameters.
+    // 라이브 파라미터를 변경하기 전에 전체 체크포인트의 이름과 형태를 먼저 검증합니다.
     for (name, tensor) in &state {
         let Some(value) = stored.get(name) else {
             return Err(io::Error::new(io::ErrorKind::NotFound, format!("missing parameter '{name}' in checkpoint")));
@@ -148,14 +161,14 @@ fn apply_state_dict(module: &dyn Module, stored: &HashMap<String, Tensor>) -> io
     Ok(())
 }
 
-/// Export and save a portable inference model (`.rtim`) for deployment on
-/// CPU, GPU or NPU.
+/// CPU, GPU 또는 NPU 배포를 위해 이식 가능한 추론 전용 모델(`.rtim`)로 내보내어 저장합니다.
 pub fn save_inference_model(module: &dyn Module, path: impl AsRef<Path>) -> Result<(), String> {
     module.eval();
     let layers = module.export()?;
     save_layers(&layers, path).map_err(|e| e.to_string())
 }
 
+/// 일련의 [`LayerSpec`] 정의들을 바이너리 `RTIM` 파일로 원자적 저장합니다.
 pub fn save_layers(layers: &[LayerSpec], path: impl AsRef<Path>) -> io::Result<()> {
     write_atomic(path, |mut w| {
         w.write_all(MODEL_MAGIC)?;
@@ -210,7 +223,7 @@ pub fn save_layers(layers: &[LayerSpec], path: impl AsRef<Path>) -> io::Result<(
     })
 }
 
-/// Load portable [`LayerSpec`]s from a `.rtim` file.
+/// `.rtim` 파일에서 이식 가능한 [`LayerSpec`] 레이어 명세 목록을 로드합니다.
 pub fn load_inference_layers(path: impl AsRef<Path>) -> io::Result<Vec<LayerSpec>> {
     let mut r = BufReader::new(File::open(path)?);
     let mut magic = [0u8; 4];

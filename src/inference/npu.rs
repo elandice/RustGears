@@ -1,17 +1,14 @@
-//! Neural Processing Unit (NPU) compiler and execution engine.
+//! 신경망 처리 장치(NPU) 컴파일러 및 실행 엔진.
 //!
-//! Real NPUs (Apple Neural Engine, Qualcomm Hexagon, Intel AI Boost, AMD XDNA)
-//! achieve high throughput and energy efficiency through three mechanisms that
-//! are explicitly modelled here:
+//! 실제 NPU(Apple Neural Engine, Qualcomm Hexagon, Intel AI Boost, AMD XDNA 등)는
+//! 다음과 같은 세 가지 핵심 메커니즘을 통해 높은 처리량과 에너지 효율을 달성하며, 이를 모델링합니다:
 //!
-//! 1. **Operator fusion** – `Linear/Conv2d + BatchNorm + Activation` are fused
-//!    into a single NPU macro-instruction so intermediate tensors never leave
-//!    on-chip SRAM.
-//! 2. **Low-precision MAC arrays** – weights and activations are quantised to
-//!    symmetric **INT8** (with **INT32** accumulators) or **FP16**, shrinking
-//!    weight bandwidth by up to **4x**.
-//! 3. **Tile / systolic execution profiling** – every run records MAC count,
-//!    fused op count, weight compression ratio and per-layer latency.
+//! 1. **연산자 융합(Operator Fusion)** – `Linear/Conv2d + BatchNorm + Activation`을 단일 NPU
+//!    매크로 명령어로 결합하여 중간 텐서가 온칩 SRAM 외부로 나가지 않도록 방지합니다.
+//! 2. **저정밀도 MAC 어레이(Low-precision MAC arrays)** – 가중치와 활성화를 대칭 **INT8**
+//!    (**INT32** 누적기) 또는 **FP16**으로 양자화하여 가중치 전송 대역폭을 최대 **4배** 절감합니다.
+//! 3. **타일/시스톨릭 실행 프로파일링** – 모든 추론 실행 시 MAC 연산 수, 융합 연산 수,
+//!    가중치 압축률 및 레이어별 지연 시간을 정밀하게 측정 및 기록합니다.
 
 use super::quantize::{int8_gemm_fused, int8_gemm_fused_serial, round_fp16, QuantTensor};
 use super::{fold_batch_norm, Activation, LayerSpec};
@@ -23,12 +20,12 @@ use rayon::prelude::*;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-/// Numerical precision used by the NPU MAC array.
+/// NPU MAC 어레이에서 사용하는 수치 정밀도.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NpuPrecision {
-    /// 8-bit integer weights & activations with 32-bit integer accumulators.
+    /// 32비트 정수 누적기를 갖춘 8비트 정수 가중치 및 활성화 경로.
     Int8,
-    /// 16-bit floating-point tensor path.
+    /// 16비트 반정밀도 부동소수점 텐서 코어 경로.
     Fp16,
 }
 
@@ -41,41 +38,48 @@ impl fmt::Display for NpuPrecision {
     }
 }
 
-/// Fused instruction executed by the NPU runtime.
+/// NPU 런타임에서 실행되는 융합 명령어 열거형.
 #[derive(Clone, Debug)]
 pub enum NpuOp {
+    /// 융합된 선형 변환 (Linear + Activation).
     FusedLinear {
         in_features: usize,
         out_features: usize,
-        /// Transposed `[out, in]` INT8 weights for systolic dot-products.
+        /// 시스톨릭 내적 연산을 위해 전치된 `[out, in]` INT8 가중치.
         weight_q_t: QuantTensor,
-        /// Transposed `[out, in]` FP16-rounded weights.
+        /// 전치된 `[out, in]` FP16 반올림 가중치.
         weight_fp16_t: Vec<f32>,
         bias: Vec<f32>,
         act: Activation,
     },
+    /// 융합된 2D 합성곱 (Conv2d + Activation).
     FusedConv2d {
         in_channels: usize,
         out_channels: usize,
         kernel: usize,
         stride: usize,
         padding: usize,
-        /// `[out, in*k*k]` INT8 weights.
+        /// `[out, in*k*k]` 형태의 INT8 가중치.
         weight_q: QuantTensor,
         weight_fp16: Vec<f32>,
         bias: Vec<f32>,
         act: Activation,
     },
+    /// 2D 맥스 풀링.
     MaxPool2d {
         kernel: usize,
         stride: usize,
     },
+    /// 다차원 텐서 평탄화.
     Flatten,
+    /// 독립 활성화 함수.
     Activation(Activation),
+    /// 소프트맥스 정규화.
     Softmax,
 }
 
 impl NpuOp {
+    /// 연산자의 식별 레이블 문자열을 반환합니다.
     pub fn label(&self) -> String {
         match self {
             NpuOp::FusedLinear { in_features, out_features, act, .. } => {
@@ -100,29 +104,40 @@ impl NpuOp {
     }
 }
 
-/// Telemetry of one NPU instruction.
+/// NPU 명령어 1개의 실행 텔레메트리 기록.
 #[derive(Clone, Debug)]
 pub struct OpRecord {
+    /// 연산자 레이블.
     pub op: String,
+    /// 수행된 누적 곱셈(MAC) 연산 횟수.
     pub macs: u64,
+    /// 실행 소요 시간.
     pub duration: Duration,
 }
 
-/// Hardware telemetry returned after an NPU inference run.
+/// NPU 추론 실행 후 수집된 하드웨어 텔레메트리 프로파일.
 #[derive(Clone, Debug)]
 pub struct NpuProfile {
+    /// 실행 정밀도 (INT8 또는 FP16).
     pub precision: NpuPrecision,
+    /// 융합 전 원본 레이어 수.
     pub original_layers: usize,
+    /// 융합 후 생성된 NPU 연산자 수.
     pub fused_ops: usize,
+    /// FP32 원본 가중치 크기 (바이트).
     pub fp32_weight_bytes: usize,
+    /// NPU 양자화 후 가중치 크기 (바이트).
     pub npu_weight_bytes: usize,
+    /// 총 MAC 연산 수.
     pub total_macs: u64,
+    /// 총 추론 소요 시간.
     pub total_time: Duration,
+    /// 레이어별 세부 실행 기록.
     pub records: Vec<OpRecord>,
 }
 
 impl NpuProfile {
-    /// Weight compression ratio (`fp32_bytes / npu_bytes`).
+    /// 가중치 압축 비율 (`fp32_bytes / npu_bytes`).
     pub fn compression_ratio(&self) -> f32 {
         if self.npu_weight_bytes == 0 {
             1.0
@@ -131,7 +146,7 @@ impl NpuProfile {
         }
     }
 
-    /// Effective throughput in GOPS (`2 * MACs / time`).
+    /// 실효 처리 성능 (GOPS, `2 * MACs / time`).
     pub fn gops(&self) -> f64 {
         let secs = self.total_time.as_secs_f64().max(1e-9);
         (self.total_macs as f64 * 2.0) / secs / 1e9
@@ -160,6 +175,7 @@ impl fmt::Display for NpuProfile {
     }
 }
 
+/// NPU 컴파일 완료된 실행 프로그램.
 pub struct NpuProgram {
     pub precision: NpuPrecision,
     pub original_layers: usize,
@@ -168,12 +184,12 @@ pub struct NpuProgram {
     pub npu_bytes: usize,
 }
 
-/// Compile a sequence of [`LayerSpec`]s into fused, quantised NPU ops.
+/// 일련의 [`LayerSpec`] 레이어 명세를 융합 및 양자화된 NPU 연산 프로그램으로 컴파일합니다.
 pub fn compile(raw: &[LayerSpec], precision: NpuPrecision) -> NpuProgram {
-    // Pass 1: fold BatchNorm into Linear / Conv2d
+    // 1단계 최적화: BatchNorm을 선행 Linear / Conv2d에 폴딩(흡수)
     let folded = fold_batch_norm(raw);
 
-    // Pass 2: fuse Linear/Conv2d + Activation and quantise weights
+    // 2단계 최적화: Linear/Conv2d + Activation 융합 및 가중치 양자화
     let mut ops: Vec<NpuOp> = Vec::new();
     let mut fp32_bytes = 0usize;
     let mut npu_bytes = 0usize;
@@ -236,7 +252,7 @@ pub fn compile(raw: &[LayerSpec], precision: NpuPrecision) -> NpuProgram {
             LayerSpec::Activation(a) => ops.push(NpuOp::Activation(*a)),
             LayerSpec::Softmax => ops.push(NpuOp::Softmax),
             LayerSpec::ChannelAffine { scale, shift } => {
-                // Standalone affine if no Linear/Conv preceded it: represent as diagonal Linear
+                // 선행 Linear/Conv가 없는 독립 Affine인 경우: 대각 Linear로 표현
                 let c = scale.len();
                 let mut w = vec![0.0; c * c];
                 for j in 0..c {
@@ -260,6 +276,7 @@ pub fn compile(raw: &[LayerSpec], precision: NpuPrecision) -> NpuProgram {
 }
 
 impl NpuProgram {
+    /// NPU 세션 파이프라인 및 압축 요약 문자열을 반환합니다.
     pub fn summary(&self, raw_count: usize) -> String {
         let ratio = if self.npu_bytes == 0 { 1.0 } else { self.fp32_bytes as f32 / self.npu_bytes as f32 };
         let names: Vec<String> = self.ops.iter().map(|o| o.label()).collect();
@@ -275,6 +292,7 @@ impl NpuProgram {
         )
     }
 
+    /// NPU 파이프라인을 실행하고 (결과 텐서, 실행 프로파일) 튜플을 반환합니다.
     pub fn execute(&self, input: &Tensor) -> (Tensor, NpuProfile) {
         let t_total = Instant::now();
         let mut data = input.to_vec();
@@ -329,7 +347,7 @@ impl NpuProgram {
                                     transpose2d_into(cols, ckk, l, cols_t);
                                     match prec {
                                         NpuPrecision::Int8 => {
-                                            let a_scale = QuantTensor::quantize_into(cols_t, aq_buf);
+                                             let a_scale = QuantTensor::quantize_into(cols_t, aq_buf);
                                             int8_gemm_fused_serial(aq_buf, a_scale, weight_q, l, ckk, *out_channels, bias, *act, y_lo);
                                         }
                                         NpuPrecision::Fp16 => {
@@ -403,12 +421,14 @@ impl NpuProgram {
     }
 }
 
+/// FP16 정밀도 융합 GEMM (출력 버퍼 신규 할당).
 fn fp16_gemm_fused(a: &[f32], b_t: &[f32], m: usize, k: usize, n: usize, bias: &[f32], act: Activation) -> Vec<f32> {
     let mut out = vec![0.0f32; m * n];
     fp16_gemm_fused_into(a, b_t, m, k, n, bias, act, &mut out);
     out
 }
 
+/// FP16 정밀도 융합 GEMM (지정된 `out` 버퍼에 기록).
 #[allow(clippy::too_many_arguments)]
 fn fp16_gemm_fused_into(a: &[f32], b_t: &[f32], m: usize, k: usize, n: usize, bias: &[f32], act: Activation, out: &mut [f32]) {
     for r in 0..m {

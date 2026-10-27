@@ -1,4 +1,4 @@
-//! Differentiable tensor operations.
+//! 자동 미분(Autograd)을 지원하는 다차원 텐서 연산자 모듈.
 
 use super::{shape, Tensor};
 use crate::autograd;
@@ -8,6 +8,7 @@ use crate::kernels;
 use rayon::prelude::*;
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
+/// 두 텐서가 동일한 디바이스(CPU/GPU)에 위치하는지 검증합니다.
 fn assert_same_device(a: &Tensor, b: &Tensor, op: &str) {
     assert_eq!(
         a.device(),
@@ -18,7 +19,7 @@ fn assert_same_device(a: &Tensor, b: &Tensor, op: &str) {
     );
 }
 
-/// Read two tensors' storage without taking the same lock twice.
+/// 동일 텐서인지 확인하여 데드락 없이 두 텐서의 데이터 버퍼 잠금을 안전하게 획득합니다.
 fn with_pair<R>(a: &Tensor, b: &Tensor, f: impl FnOnce(&[f32], &[f32]) -> R) -> R {
     if a.id() == b.id() {
         let d = a.data();
@@ -30,6 +31,7 @@ fn with_pair<R>(a: &Tensor, b: &Tensor, f: impl FnOnce(&[f32], &[f32]) -> R) -> 
     }
 }
 
+/// 단항 연산자별 역전파 연산자 이름을 반환합니다.
 fn unary_name(op: UnaryOp) -> &'static str {
     match op {
         UnaryOp::Neg => "NegBackward",
@@ -44,23 +46,24 @@ fn unary_name(op: UnaryOp) -> &'static str {
     }
 }
 
-/// Fast broadcast patterns that avoid allocating `Vec<usize>` index maps.
+/// 불필요한 `Vec<usize>` 인덱스 맵 할당을 방지하는 고속 브로드캐스팅 패턴 열거형
 enum BroadcastKind {
-    /// Identical shapes (`a.shape() == b.shape()`).
+    /// 두 텐서의 형상이 완전히 동일한 경우 (`a.shape() == b.shape()`).
     Same,
-    /// `b` has shape `[D]` or `[1, .., 1, D]` broadcast over `a` of shape `[.., D]` (`outer = a.len() / D`).
+    /// `b`가 `[D]` 또는 `[1, .., 1, D]` 형태이고 `a`의 마지막 차원에 맞춰 브로드캐스팅되는 경우 (`outer = a.len() / D`).
     LastDimB { outer: usize, d: usize },
-    /// `b` has shape `[1, C, 1, 1]` broadcast over `a` of shape `[N, C, H, W]`.
+    /// `b`가 `[1, C, 1, 1]` 형태이고 `a`가 `[N, C, H, W]`인 4차원 채널 브로드캐스팅 경우.
     Channel4dB { n: usize, c: usize, spatial: usize },
-    /// General NumPy broadcast fallback with precomputed index maps.
+    /// 사전 계산된 인덱스 맵을 사용하는 일반 NumPy 브로드캐스팅 폴백.
     General(Vec<usize>, Vec<usize>),
 }
 
 impl Tensor {
     // ------------------------------------------------------------------
-    // element-wise binary (with fast-path broadcasting)
+    // 요소별 이항 연산 (고속 경로 브로드캐스팅 지원)
     // ------------------------------------------------------------------
 
+    /// 브로드캐스팅과 역전파 계산 그래프 기록을 지원하는 기본 이항 연산자
     fn binary(&self, other: &Tensor, op: BinaryOp) -> Tensor {
         assert_same_device(self, other, &format!("{op:?}"));
         let a_shape = self.shape().to_vec();
@@ -357,23 +360,28 @@ impl Tensor {
         )
     }
 
+    /// 두 텐서의 요소별 덧셈 (`+`, 브로드캐스팅 지원)
     pub fn add(&self, other: &Tensor) -> Tensor {
         self.binary(other, BinaryOp::Add)
     }
+    /// 두 텐서의 요소별 뺄셈 (`-`, 브로드캐스팅 지원)
     pub fn sub(&self, other: &Tensor) -> Tensor {
         self.binary(other, BinaryOp::Sub)
     }
+    /// 두 텐서의 요소별 곱셈 (`*`, 아다마르 곱, 브로드캐스팅 지원)
     pub fn mul(&self, other: &Tensor) -> Tensor {
         self.binary(other, BinaryOp::Mul)
     }
+    /// 두 텐서의 요소별 나눗셈 (`/`, 브로드캐스팅 지원)
     pub fn div(&self, other: &Tensor) -> Tensor {
         self.binary(other, BinaryOp::Div)
     }
 
     // ------------------------------------------------------------------
-    // scalar ops
+    // 스칼라 연산 (Scalar ops)
     // ------------------------------------------------------------------
 
+    /// 함수 `f`와 도함수 `df`를 적용하여 텐서의 각 원소를 변환하는 헬퍼 함수
     fn scalar_map(&self, name: &'static str, f: impl Fn(f32) -> f32, df: impl Fn(f32) -> f32 + Send + Sync + 'static) -> Tensor {
         let data: Vec<f32> = self.data().iter().map(|&x| f(x)).collect();
         let x = self.clone();
@@ -390,26 +398,32 @@ impl Tensor {
         )
     }
 
+    /// 모든 원소에 스칼라 `s`를 더합니다.
     pub fn add_scalar(&self, s: f32) -> Tensor {
         self.scalar_map("AddScalarBackward", move |x| x + s, |_| 1.0)
     }
 
+    /// 모든 원소에 스칼라 `s`를 곱합니다.
     pub fn mul_scalar(&self, s: f32) -> Tensor {
         self.scalar_map("MulScalarBackward", move |x| x * s, move |_| s)
     }
 
+    /// 모든 원소를 스칼라 `s`로 나눕니다.
     pub fn div_scalar(&self, s: f32) -> Tensor {
         self.mul_scalar(1.0 / s)
     }
 
+    /// 모든 원소에 스칼라 `p` 거듭제곱을 취합니다 (`x^p`).
     pub fn pow_scalar(&self, p: f32) -> Tensor {
         self.scalar_map("PowBackward", move |x| x.powf(p), move |x| p * x.powf(p - 1.0))
     }
 
+    /// 모든 원소를 제곱합니다 (`x^2`).
     pub fn square(&self) -> Tensor {
         self.scalar_map("SquareBackward", |x| x * x, |x| 2.0 * x)
     }
 
+    /// Leaky ReLU 활성화 함수를 적용합니다 (`x > 0 ? x : slope * x`).
     pub fn leaky_relu(&self, slope: f32) -> Tensor {
         self.scalar_map(
             "LeakyReluBackward",
@@ -418,13 +432,16 @@ impl Tensor {
         )
     }
 
+    /// 모든 원소 값을 `[lo, hi]` 범위 내로 제한(클램핑)합니다.
     pub fn clamp(&self, lo: f32, hi: f32) -> Tensor {
         self.scalar_map("ClampBackward", move |x| x.clamp(lo, hi), move |x| if x >= lo && x <= hi { 1.0 } else { 0.0 })
     }
 
     // ------------------------------------------------------------------
-    // unary (dispatched to the device backend)
+    // 단항 연산 (디바이스 백엔드로 디스패치)
     // ------------------------------------------------------------------
+
+    /// 단항 연산자를 백엔드 커널로 실행하고 미분 노드를 등록합니다.
 
     fn unary(&self, op: UnaryOp) -> Tensor {
         let y = self.backend().unary(op, &self.data());
@@ -462,40 +479,49 @@ impl Tensor {
         )
     }
 
+    /// 부호 반전 (`-x`)
     pub fn neg(&self) -> Tensor {
         self.unary(UnaryOp::Neg)
     }
+    /// 밑이 e인 지수 함수 (`e^x`)
     pub fn exp(&self) -> Tensor {
         self.unary(UnaryOp::Exp)
     }
+    /// 자연로그 (`ln(x)`)
     pub fn log(&self) -> Tensor {
         self.unary(UnaryOp::Log)
     }
+    /// 정류 선형 유닛 활성화 함수 (ReLU, `max(0, x)`)
     pub fn relu(&self) -> Tensor {
         self.unary(UnaryOp::Relu)
     }
+    /// 로지스틱 시그모이드 활성화 함수 (`1 / (1 + e^-x)`)
     pub fn sigmoid(&self) -> Tensor {
         self.unary(UnaryOp::Sigmoid)
     }
+    /// 하이퍼볼릭 탄젠트 활성화 함수 (`tanh(x)`)
     pub fn tanh(&self) -> Tensor {
         self.unary(UnaryOp::Tanh)
     }
+    /// 제곱근 (`sqrt(x)`)
     pub fn sqrt(&self) -> Tensor {
         self.unary(UnaryOp::Sqrt)
     }
+    /// 가우스 오차 선형 유닛 활성화 함수 (GELU)
     pub fn gelu(&self) -> Tensor {
         self.unary(UnaryOp::Gelu)
     }
+    /// 절댓값 (`|x|`)
     pub fn abs(&self) -> Tensor {
         self.unary(UnaryOp::Abs)
     }
 
     // ------------------------------------------------------------------
-    // linear algebra
+    // 선형대수 연산 (Linear algebra)
     // ------------------------------------------------------------------
 
-    /// Matrix product supporting `[m,k]@[k,n]`, `[b,m,k]@[k,n]`,
-    /// `[b,m,k]@[b,k,n]` and `[k]@[k,n]`.
+    /// 행렬 곱셈 연산:
+    /// `[m, k] @ [k, n]`, `[b, m, k] @ [k, n]`, `[b, m, k] @ [b, k, n]`, `[k] @ [k, n]`을 지원합니다.
     pub fn matmul(&self, other: &Tensor) -> Tensor {
         match (self.ndim(), other.ndim()) {
             (2, 2) => self.mm(other),
@@ -542,7 +568,7 @@ impl Tensor {
         )
     }
 
-    /// Batched matrix multiply `[b,m,k] @ [b,k,n] -> [b,m,n]`.
+    /// 배치 행렬 곱셈: `[b, m, k] @ [b, k, n] -> [b, m, n]`
     pub fn bmm(&self, other: &Tensor) -> Tensor {
         assert_same_device(self, other, "bmm");
         assert!(self.ndim() == 3 && other.ndim() == 3, "bmm expects 3-D tensors");
@@ -586,9 +612,10 @@ impl Tensor {
     }
 
     // ------------------------------------------------------------------
-    // shape manipulation
+    // 형상 조작 (Shape manipulation)
     // ------------------------------------------------------------------
 
+    /// 텐서의 형태(Shape)를 변경합니다 (원소의 총 개수는 일치해야 함).
     pub fn reshape(&self, new_shape: &[usize]) -> Tensor {
         let n: usize = new_shape.iter().product();
         assert_eq!(n, self.numel(), "reshape: cannot reshape {:?} into {:?}", self.shape(), new_shape);
@@ -602,20 +629,21 @@ impl Tensor {
         )
     }
 
-    /// Flatten all dimensions from `start_dim` onward.
+    /// `start_dim`부터 마지막 차원까지를 단일 차원으로 평탄화합니다.
     pub fn flatten(&self, start_dim: usize) -> Tensor {
         let mut s: Vec<usize> = self.shape()[..start_dim].to_vec();
         s.push(self.shape()[start_dim..].iter().product());
         self.reshape(&s)
     }
 
-    /// Insert a dimension of size 1.
+    /// 지정된 `dim` 위치에 크기 1인 새로운 차원을 삽입합니다.
     pub fn unsqueeze(&self, dim: usize) -> Tensor {
         let mut s = self.shape().to_vec();
         s.insert(dim, 1);
         self.reshape(&s)
     }
 
+    /// 주어진 순열(`perm`)에 따라 차원 축들을 재배치합니다.
     pub fn permute(&self, perm: &[usize]) -> Tensor {
         let (data, out_shape) = shape::permute(&self.data(), self.shape(), perm);
         let in_shape = self.shape().to_vec();
@@ -638,19 +666,20 @@ impl Tensor {
         )
     }
 
+    /// 두 차원 `d0`과 `d1`의 축을 맞바꿉니다.
     pub fn transpose(&self, d0: usize, d1: usize) -> Tensor {
         let mut perm: Vec<usize> = (0..self.ndim()).collect();
         perm.swap(d0, d1);
         self.permute(&perm)
     }
 
-    /// Transpose of a 2-D tensor.
+    /// 2차원 텐서의 행과 열을 전치(Transpose)합니다.
     pub fn t(&self) -> Tensor {
         assert_eq!(self.ndim(), 2, "t() expects a 2-D tensor");
         self.transpose(0, 1)
     }
 
-    /// Copy to another device (differentiable).
+    /// 텐서를 다른 디바이스(CPU/GPU)로 복사합니다 (미분 이력 유지).
     pub fn to(&self, device: Device) -> Tensor {
         if device == self.device() {
             return self.clone();
@@ -666,23 +695,23 @@ impl Tensor {
     }
 
     // ------------------------------------------------------------------
-    // reductions
+    // 집계 및 축소 연산 (Reductions)
     // ------------------------------------------------------------------
 
-    /// Sum of all elements (scalar).
+    /// 텐서의 모든 원소를 합산하여 스칼라 텐서로 반환합니다.
     pub fn sum(&self) -> Tensor {
         let s: f32 = self.data().iter().sum();
         let n = self.numel();
         Tensor::from_op(vec![s], vec![], self.device(), vec![self.clone()], "SumBackward", Box::new(move |g| vec![Some(vec![g[0]; n])]))
     }
 
-    /// Mean of all elements (scalar).
+    /// 텐서의 모든 원소에 대한 평균값을 계산하여 스칼라 텐서로 반환합니다.
     pub fn mean(&self) -> Tensor {
         let n = self.numel().max(1) as f32;
         self.sum().mul_scalar(1.0 / n)
     }
 
-    /// Sum along `dim` (negative indexes from the end).
+    /// 지정한 차원(`dim`)을 따라 합계를 계산합니다 (`keepdim`이 참이면 축소된 차원을 크기 1로 유지).
     pub fn sum_dim(&self, dim: isize, keepdim: bool) -> Tensor {
         let d = self.dim_index(dim);
         let (outer, size, inner) = shape::split_at_dim(self.shape(), d);
@@ -722,19 +751,20 @@ impl Tensor {
         )
     }
 
+    /// 지정한 차원(`dim`)을 따라 평균을 계산합니다.
     pub fn mean_dim(&self, dim: isize, keepdim: bool) -> Tensor {
         let n = self.size(dim) as f32;
         self.sum_dim(dim, keepdim).mul_scalar(1.0 / n)
     }
 
-    /// Biased variance along `dim`.
+    /// 지정한 차원(`dim`)을 따라 편향 분산(Biased variance)을 계산합니다.
     pub fn var_dim(&self, dim: isize, keepdim: bool) -> Tensor {
         let mu = self.mean_dim(dim, true);
         let c = self.sub(&mu);
         c.square().mean_dim(dim, keepdim)
     }
 
-    /// Numerically stable softmax along `dim`.
+    /// 지정한 축(`dim`)을 따라 수치적으로 안정적인 소프트맥스(Softmax)를 계산합니다.
     pub fn softmax(&self, dim: isize) -> Tensor {
         let d = self.dim_index(dim);
         let (outer, size, inner) = shape::split_at_dim(self.shape(), d);
@@ -762,7 +792,7 @@ impl Tensor {
         )
     }
 
-    /// Numerically stable log-softmax along `dim`.
+    /// 지정한 축(`dim`)을 따라 수치적으로 안정적인 로그 소프트맥스(Log-Softmax)를 계산합니다.
     pub fn log_softmax(&self, dim: isize) -> Tensor {
         let d = self.dim_index(dim);
         let (outer, size, inner) = shape::split_at_dim(self.shape(), d);
@@ -791,10 +821,10 @@ impl Tensor {
     }
 
     // ------------------------------------------------------------------
-    // convolution / pooling
+    // 합성곱 및 풀링 연산 (Convolution / Pooling)
     // ------------------------------------------------------------------
 
-    /// 2-D convolution. `self`: `[N,C,H,W]`, `weight`: `[O,C,k,k]` -> `[N,O,OH,OW]`.
+    /// 2차원 합성곱 연산: `self`: `[N, C, H, W]`, `weight`: `[O, C, k, k]` -> `[N, O, OH, OW]`
     pub fn conv2d(&self, weight: &Tensor, stride: usize, padding: usize) -> Tensor {
         assert_same_device(self, weight, "conv2d");
         assert_eq!(self.ndim(), 4, "conv2d input must be [N,C,H,W], got {:?}", self.shape());
@@ -909,8 +939,8 @@ impl Tensor {
         )
     }
 
-    /// Transposed convolution on `[N,C,H,W]` with weights `[C,O,k,k]`.
-    /// Square kernels, unit dilation and one group are supported.
+    /// `[N, C, H, W]` 입력과 `[C, O, k, k]` 가중치에 대한 2차원 전치 합성곱 (Transposed Convolution).
+    /// 정사각형 커널, 팽창 계수(dilation) 1 및 단일 그룹을 지원합니다.
     pub fn conv_transpose2d(&self, weight: &Tensor, stride: usize, padding: usize, output_padding: usize) -> Tensor {
         assert_same_device(self, weight, "conv_transpose2d");
         assert_eq!(self.ndim(), 4, "conv_transpose2d input must be [N,C,H,W]");
@@ -959,8 +989,8 @@ impl Tensor {
         }))
     }
 
-    /// Average pooling on `[N,C,H,W]` to a fixed `(height, width)`.
-    /// Non-divisible input sizes use overlapping floor/ceil pooling regions.
+    /// `[N, C, H, W]` 입력에 대해 고정된 `(height, width)` 크기로 2D 적응형 평균 풀링을 수행합니다.
+    /// 나누어떨어지지 않는 입력 크기는 바닥(floor)/올림(ceil)을 적용한 오버랩 영역을 사용합니다.
     pub fn adaptive_avg_pool2d(&self, output_size: (usize, usize)) -> Tensor {
         assert_eq!(self.ndim(), 4, "adaptive_avg_pool2d input must be [N,C,H,W]");
         let (n, c, h, w) = (self.shape()[0], self.shape()[1], self.shape()[2], self.shape()[3]);
@@ -999,7 +1029,7 @@ impl Tensor {
         }))
     }
 
-    /// 2-D max pooling on `[N,C,H,W]`.
+    /// `[N, C, H, W]` 입력에 대한 2차원 최대 풀링 (Max Pooling).
     pub fn max_pool2d(&self, kernel: usize, stride: usize) -> Tensor {
         assert_eq!(self.ndim(), 4, "max_pool2d input must be [N,C,H,W]");
         let (n, c, h, w) = (self.shape()[0], self.shape()[1], self.shape()[2], self.shape()[3]);
@@ -1024,6 +1054,7 @@ impl Tensor {
     }
 }
 
+/// 최댓값을 감산하여 오버플로를 방지하는 수치적으로 안정적인 소프트맥스 원시 계산 함수
 pub(crate) fn softmax_raw(x: &[f32], outer: usize, size: usize, inner: usize) -> Vec<f32> {
     let mut y = vec![0.0; x.len()];
     for o in 0..outer {
@@ -1045,7 +1076,7 @@ pub(crate) fn softmax_raw(x: &[f32], outer: usize, size: usize, inner: usize) ->
 }
 
 // ----------------------------------------------------------------------
-// operator overloading:  &a + &b, a * 2.0, -a, ...
+// 연산자 오버로딩: &a + &b, a * 2.0, -a 등
 // ----------------------------------------------------------------------
 
 macro_rules! impl_binop {

@@ -1,4 +1,4 @@
-//! Normalisation layers.
+//! 신경망 정규화(Normalization) 레이어 모듈.
 
 use super::Module;
 use crate::autograd;
@@ -6,25 +6,34 @@ use crate::inference::LayerSpec;
 use crate::tensor::Tensor;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Batch normalisation over the channel dimension (dim 1).
+/// 채널 차원(dim 1)을 기준으로 정규화를 수행하는 배치 정규화(Batch Normalization) 레이어.
 ///
-/// * `BatchNorm1d` – input `[N, C]`
-/// * `BatchNorm2d` – input `[N, C, H, W]` (statistics over N, H, W)
+/// * `BatchNorm1d` – 2차원 입력 `[N, C]` 지원
+/// * `BatchNorm2d` – 4차원 공간 입력 `[N, C, H, W]` 지원 (N, H, W 축에 걸쳐 통계량 산출)
 pub struct BatchNorm {
+    /// 채널별 스케일(Scale) 학습 파라미터 ($\gamma$)
     pub gamma: Tensor,
+    /// 채널별 시프트(Shift/Bias) 학습 파라미터 ($\beta$)
     pub beta: Tensor,
+    /// 추론에 사용되는 채널별 누적 이동 평균
     pub running_mean: Tensor,
+    /// 추론에 사용되는 채널별 누적 이동 분산
     pub running_var: Tensor,
+    /// 입력 특징(채널) 개수
     pub num_features: usize,
+    /// 이동 통계량 갱신 모멘텀 (기본값: 0.1)
     pub momentum: f32,
+    /// 분모 0 방지용 소수 epsilon (기본값: 1e-5)
     pub eps: f32,
+    /// 4차원 공간(spatial: `[N, C, H, W]`) 데이터 여부
     spatial: bool,
+    /// 학습/평가 모드 플래그
     training: AtomicBool,
 }
 
 pub type BatchNorm1d = BatchNorm;
 
-/// Alias constructor for the spatial (4-D) variant.
+/// 4차원 이미지/특징 맵 입력(`[N, C, H, W]`)을 위한 생성자 헬퍼 구조체
 pub struct BatchNorm2d;
 
 impl BatchNorm2d {
@@ -35,10 +44,12 @@ impl BatchNorm2d {
 }
 
 impl BatchNorm {
+    /// 2차원 입력(`[N, C]`)을 위한 1D 배치 정규화 레이어를 생성합니다.
     pub fn new(num_features: usize) -> Self {
         Self::with_spatial(num_features, false)
     }
 
+    /// 내부 생성자: 공간 차원 여부를 지정하여 초기화합니다.
     fn with_spatial(num_features: usize, spatial: bool) -> Self {
         assert!(num_features > 0, "BatchNorm feature count must be positive");
         BatchNorm {
@@ -80,7 +91,7 @@ impl Module for BatchNorm {
             let mut var = vec![0.0f32; c];
             let mut inv_std = vec![0.0f32; c];
 
-            // Compute per-channel mean and biased variance directly over contiguous spatial slices
+            // 연속된 공간 슬라이스에 대해 채널별 평균 및 편향 분산 직접 계산
             for bi in 0..n {
                 for ch in 0..c {
                     let base = (bi * c + ch) * s;
@@ -114,7 +125,7 @@ impl Module for BatchNorm {
                 inv_std[ch] = 1.0 / (var[ch] + self.eps).sqrt();
             }
 
-            // Update running statistics
+            // 누적 이동 통계량 갱신 (Bessel 보정 적용)
             {
                 let mom = self.momentum;
                 let count_f = m_count as f32;
@@ -214,6 +225,7 @@ impl Module for BatchNorm {
                 }),
             )
         } else {
+            // 평가(추론) 모드: 고정된 이동 통계량 사용
             let xd = x.data();
             let gd = self.gamma.data();
             let bd = self.beta.data();
@@ -319,8 +331,7 @@ impl Module for BatchNorm {
         self.training.store(t, Ordering::Relaxed);
     }
 
-    /// Exported as a per-channel affine transform (folded into the previous
-    /// Linear/Conv by the inference optimiser).
+    /// 채널별 아핀 변환으로 내보냅니다 (추론 최적화 시 이전 Linear/Conv 레이어와 융합됨).
     fn export(&self) -> Result<Vec<LayerSpec>, String> {
         let g = self.gamma.to_vec();
         let b = self.beta.to_vec();
@@ -332,7 +343,7 @@ impl Module for BatchNorm {
     }
 }
 
-/// Layer normalisation over the last dimension.
+/// 마지막 차원을 따라 평균과 분산을 정규화하는 레이어 정규화 (Layer Normalization).
 pub struct LayerNorm {
     pub gamma: Tensor,
     pub beta: Tensor,
@@ -341,6 +352,7 @@ pub struct LayerNorm {
 }
 
 impl LayerNorm {
+    /// 지정된 특징 차원 크기로 새 LayerNorm을 생성합니다.
     pub fn new(dim: usize) -> Self {
         assert!(dim > 0, "LayerNorm dimension must be positive");
         LayerNorm {
@@ -369,10 +381,10 @@ impl Module for LayerNorm {
     }
 }
 
-/// Root Mean Square Layer Normalization (RMSNorm).
+/// 평균 제곱근 레이어 정규화 (Root Mean Square Layer Normalization: RMSNorm).
 ///
-/// Widely used in modern LLMs (e.g. LLaMA, Gemma, Mistral) for faster computation and training stability:
-/// `y = (x / RMS(x)) * weight`, where `RMS(x) = sqrt(mean(x^2) + eps)`.
+/// LLaMA, Gemma, Mistral 등 최신 대형 언어 모델(LLM)에서 연산 효율성과 학습 안정성을 위해 널리 사용됩니다:
+/// `y = (x / RMS(x)) * weight`, 여기서 `RMS(x) = sqrt(mean(x^2) + eps)`.
 pub struct RMSNorm {
     pub weight: Tensor,
     pub dim: usize,
@@ -380,6 +392,7 @@ pub struct RMSNorm {
 }
 
 impl RMSNorm {
+    /// 지정된 특징 차원 크기로 새 RMSNorm을 생성합니다.
     pub fn new(dim: usize) -> Self {
         assert!(dim > 0, "RMSNorm dimension must be positive");
         RMSNorm {
@@ -389,6 +402,7 @@ impl RMSNorm {
         }
     }
 
+    /// 분모 안정화 상수 epsilon을 설정합니다.
     pub fn eps(mut self, eps: f32) -> Self {
         self.eps = eps;
         self

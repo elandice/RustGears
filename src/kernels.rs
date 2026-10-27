@@ -1,10 +1,12 @@
-//! Raw (non-autograd) numeric kernels shared by training ops and the inference
-//! runtime: im2col / col2im convolution helpers and max pooling.
+//! 자동 미분(autograd) 오버헤드가 없는 순수 수치 연산 커널 모듈입니다.
+//!
+//! 학습용 텐서 연산자와 경량 추론 런타임에서 공유되며,
+//! 합성곱(Convolution) 가속을 위한 im2col / col2im 헬퍼 및 2D 최대 풀링(Max Pooling) 커널을 제공합니다.
 
 use crate::device::cpu::cpu_matmul_into;
 use rayon::prelude::*;
 
-/// Output spatial size of a convolution / pooling window.
+/// 합성곱(Convolution) 또는 풀링(Pooling) 연산의 출력 공간 차원(높이 또는 너비) 크기를 계산합니다.
 pub fn out_size(input: usize, kernel: usize, stride: usize, pad: usize) -> usize {
     assert!(kernel > 0 && stride > 0, "kernel and stride must be positive");
     let padded = pad.checked_mul(2).and_then(|p| input.checked_add(p)).expect("padded input size overflow");
@@ -12,7 +14,7 @@ pub fn out_size(input: usize, kernel: usize, stride: usize, pad: usize) -> usize
     (padded - kernel) / stride + 1
 }
 
-/// Unfold one image `[C,H,W]` into columns `[C*k*k, OH*OW]`.
+/// 단일 이미지 `[C, H, W]`를 행렬 곱이 가능한 열 행렬 `[C * k * k, OH * OW]` 형태로 전개(Unfold/im2col)합니다.
 pub fn im2col(x: &[f32], c: usize, h: usize, w: usize, k: usize, stride: usize, pad: usize) -> Vec<f32> {
     let oh = out_size(h, k, stride, pad);
     let ow = out_size(w, k, stride, pad);
@@ -21,7 +23,7 @@ pub fn im2col(x: &[f32], c: usize, h: usize, w: usize, k: usize, stride: usize, 
     cols
 }
 
-/// Unfold one image `[C,H,W]` into a pre-allocated buffer `cols` of length `C*k*k*OH*OW`.
+/// 단일 이미지 `[C, H, W]`를 사전에 할당된 `cols` 버퍼(`길이: C * k * k * OH * OW`)에 직접 전개합니다.
 #[allow(clippy::too_many_arguments)]
 pub fn im2col_into(
     x: &[f32],
@@ -39,6 +41,7 @@ pub fn im2col_into(
     if pad > 0 {
         cols.fill(0.0);
     }
+    // 스트라이드가 1인 경우: 연속된 메모리 블록을 고속 슬라이스 복사(copy_from_slice)로 처리
     if stride == 1 {
         for ch in 0..c {
             let ch_off = ch * h * w;
@@ -67,6 +70,7 @@ pub fn im2col_into(
             }
         }
     } else {
+        // 스트라이드가 1이 아닌 일반적인 경우: 인덱스 직접 계산
         for ch in 0..c {
             for ki in 0..k {
                 for kj in 0..k {
@@ -91,13 +95,14 @@ pub fn im2col_into(
     }
 }
 
-/// Fold columns `[C*k*k, OH*OW]` back into an image `[C,H,W]` (accumulating).
+/// 열 행렬 `[C * k * k, OH * OW]`를 이미지 형태 `[C, H, W]`로 다시 접어 넣으며(col2im) 기울기를 누적합니다.
 #[allow(clippy::too_many_arguments)]
 pub fn col2im(cols: &[f32], c: usize, h: usize, w: usize, k: usize, stride: usize, pad: usize, out: &mut [f32]) {
     let oh = out_size(h, k, stride, pad);
     let ow = out_size(w, k, stride, pad);
     let l = oh * ow;
     if stride == 1 {
+        // 스트라이드 1 최적화 경로: 가로 방향 슬라이스 누적
         for ch in 0..c {
             let ch_off = ch * h * w;
             for ki in 0..k {
@@ -129,6 +134,7 @@ pub fn col2im(cols: &[f32], c: usize, h: usize, w: usize, k: usize, stride: usiz
             }
         }
     } else {
+        // 일반 스트라이드: 픽셀별 누적
         for ch in 0..c {
             for ki in 0..k {
                 for kj in 0..k {
@@ -153,8 +159,9 @@ pub fn col2im(cols: &[f32], c: usize, h: usize, w: usize, k: usize, stride: usiz
     }
 }
 
-/// Max pooling over `[N,C,H,W]`. Returns `(output, argmax_indices)` where each
-/// index points into the flattened input.
+/// `[N, C, H, W]` 텐서에 대한 2D 최대 풀링(Max Pooling) 연산.
+/// `(최댓값_출력_벡터, 최댓값_인덱스_벡터)`를 반환하며,
+/// 각 인덱스는 역전파 시 정확한 위치로 기울기를 전달하기 위해 평탄화된 입력 배열의 인덱스를 가리킵니다.
 pub fn max_pool2d(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, stride: usize) -> (Vec<f32>, Vec<usize>) {
     let oh = out_size(h, k, stride, 0);
     let ow = out_size(w, k, stride, 0);
@@ -163,6 +170,7 @@ pub fn max_pool2d(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, s
     let mut out = vec![0.0f32; total];
     let mut arg = vec![0usize; total];
 
+    // 단일 채널 평면에 대한 풀링 연산 클로저
     let pool_plane = |(plane, (out_plane, arg_plane)): (usize, (&mut [f32], &mut [usize]))| {
         let base = plane * h * w;
         for oy in 0..oh {
@@ -189,6 +197,7 @@ pub fn max_pool2d(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, s
         }
     };
 
+    // 연산량이 많을 경우 Rayon 병렬 청크 처리
     if total >= 8192 && l > 0 {
         out.par_chunks_mut(l)
             .zip(arg.par_chunks_mut(l))
@@ -203,8 +212,8 @@ pub fn max_pool2d(x: &[f32], n: usize, c: usize, h: usize, w: usize, k: usize, s
     (out, arg)
 }
 
-/// Convolution forward for a batch (`W[O, C*k*k] @ cols[C*k*k, L]`).
-/// Parallelizes across batch samples using thread-local `im2col` buffers and AVX2 GEMM.
+/// 미니배치에 대한 2D 합성곱 순전파 연산 (`W[O, C*k*k] @ cols[C*k*k, L]`).
+/// 스레드별 로컬 `im2col` 버퍼와 AVX2 GEMM 행렬 곱 커널을 사용하여 배치 단위 병렬 처리를 수행합니다.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn conv2d_forward(
     x: &[f32],
@@ -226,6 +235,7 @@ pub fn conv2d_forward(
     let img_stride = c * h * w;
     let out_stride = o * l;
 
+    // 배치가 2 이상이고 연산량이 충분할 경우 Rayon 멀티스레드 병렬 실행
     if n >= 2 && n * o * ckk * l >= 16384 && out_stride > 0 {
         let mut out = vec![0.0f32; n * out_stride];
         out.par_chunks_mut(out_stride)
@@ -240,6 +250,7 @@ pub fn conv2d_forward(
             );
         (out, oh, ow)
     } else {
+        // 단일 스레드 순차 실행
         let mut out = Vec::with_capacity(n * out_stride);
         let mut cols = vec![0.0f32; ckk * l];
         for b in 0..n {

@@ -1,17 +1,20 @@
-//! Symmetric INT8 and simulated FP16 quantisation used by the NPU runtime.
+//! NPU 런타임에서 사용하는 대칭(Symmetric) INT8 및 모의 FP16 양자화.
 
 use rayon::prelude::*;
 
-/// Symmetrically quantised INT8 tensor (`real ≈ data[i] * scale`).
+/// 대칭적으로 양자화된 INT8 텐서 (`실제값 ≈ data[i] * scale`).
 #[derive(Clone, Debug)]
 pub struct QuantTensor {
+    /// 양자화된 i8 정수 데이터 (`[-127, 127]`).
     pub data: Vec<i8>,
+    /// 양자화 스케일 팩터.
     pub scale: f32,
+    /// 텐서 형태(Shape).
     pub shape: Vec<usize>,
 }
 
 impl QuantTensor {
-    /// Quantise an `f32` buffer into symmetric `i8` (`[-127, 127]`).
+    /// `f32` 버퍼를 대칭 `i8` (`[-127, 127]`) 범위로 양자화합니다.
     pub fn from_f32(values: &[f32], shape: &[usize]) -> Self {
         let max_abs = values.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let scale = if max_abs < 1e-12 { 1.0 } else { max_abs / 127.0 };
@@ -20,7 +23,7 @@ impl QuantTensor {
         QuantTensor { data, scale, shape: shape.to_vec() }
     }
 
-    /// Quantise `values` into an existing `i8` buffer and return `scale`.
+    /// `values` 데이터를 기존 `i8` 버퍼에 양자화하여 기록하고 계산된 `scale`을 반환합니다.
     pub fn quantize_into(values: &[f32], out: &mut [i8]) -> f32 {
         let max_abs = values.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
         let scale = if max_abs < 1e-12 { 1.0 } else { max_abs / 127.0 };
@@ -31,36 +34,36 @@ impl QuantTensor {
         scale
     }
 
-    /// Dequantise back to `f32`.
+    /// 양자화된 데이터를 다시 `f32` 부동소수점으로 역양자화(Dequantize)합니다.
     pub fn to_f32(&self) -> Vec<f32> {
         self.data.iter().map(|&q| q as f32 * self.scale).collect()
     }
 
-    /// Memory footprint in bytes (1 byte per weight + 4-byte scale).
+    /// 메모리 점유 바이트 크기를 반환합니다 (가중치당 1바이트 + 4바이트 스케일 계수).
     pub fn byte_size(&self) -> usize {
         self.data.len() + 4
     }
 }
 
-/// Round an `f32` to IEEE-754 binary16 (FP16) precision and back, modelling
-/// an NPU FP16 tensor core.
+/// `f32` 값을 IEEE-754 binary16 (FP16) 정밀도로 반올림 변환하여 NPU FP16 텐서 코어의 수치적 거동을 모사합니다.
 #[inline]
 pub fn round_fp16(x: f32) -> f32 {
     let bits = x.to_bits();
     let sign = bits & 0x8000_0000;
     let exp = ((bits >> 23) & 0xff) as i32 - 127;
     if exp < -14 {
-        return 0.0; // underflow to zero
+        return 0.0; // 언더플로우 발생 시 0으로 수렴
     }
     if exp > 15 {
-        return f32::from_bits(sign | 0x477f_e000); // clamp to FP16 max (65504)
+        return f32::from_bits(sign | 0x477f_e000); // FP16 최대값(65504)으로 클램핑
     }
-    // keep top 10 mantissa bits (round to nearest even)
+    // 가수부 상위 10비트 유지 (가장 가까운 짝수로 반올림)
     let round_bit = 1u32 << 12;
     let rounded = (bits + round_bit) & !0x1fff;
     f32::from_bits(rounded)
 }
 
+/// 4-way 언롤링을 적용한 i8 벡터 간 고속 정수 내적 연산 (i32 누적).
 #[inline]
 fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     let mut acc0: i32 = 0;
@@ -84,12 +87,12 @@ fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
     total
 }
 
-/// INT8 systolic-array GEMM:
-/// `A_q[m, k] (i8) * B_q[k, n] (i8)` accumulated into `i32` registers, then
-/// rescaled to `f32` (`scale_a * scale_b`) + `bias` + fused `activation`.
+/// INT8 시스톨릭 어레이 GEMM 연산:
+/// `A_q[m, k] (i8) * B_q[k, n] (i8)`을 `i32` 레지스터에 누적한 뒤,
+/// `f32`로 재스케일링(`scale_a * scale_b`)하고 `bias` 합산 및 융합된 `activation`을 한 번에 적용합니다.
 pub fn int8_gemm_fused(
     a: &QuantTensor,
-    b_t: &QuantTensor, // transposed: [n, k] for contiguous dot products
+    b_t: &QuantTensor, // 전치된 행렬: 연속된 내적을 위해 [n, k] 형태
     m: usize,
     k: usize,
     n: usize,
@@ -114,7 +117,7 @@ pub fn int8_gemm_fused(
     out
 }
 
-/// Single-threaded INT8 GEMM writing into `out` (used inside batch-parallel NPU Conv2d).
+/// 지정된 `out` 버퍼에 결과를 기록하는 단일 스레드 INT8 GEMM (배치 병렬 NPU Conv2d 내부에서 활용).
 #[allow(clippy::too_many_arguments)]
 pub fn int8_gemm_fused_serial(
     a_data: &[i8],

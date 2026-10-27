@@ -1,11 +1,10 @@
-//! End-to-end showcase of RustGears:
-//! 1. Hardware discovery & device selection (`CPU`, `GPU:0`, ...)
-//! 2. Multi-GPU Data-Parallel training (`DataParallel` + `ring_all_reduce`)
-//! 3. Checkpointing & portable model export (`.rtim`)
-//! 4. Inference on the **NPU** (`ExecutionProvider::Npu(Int8 / Fp16)`) with
-//!    operator fusion and systolic-array telemetry.
+//! RustGears 엔드투엔드(End-to-End) 딥러닝 워크플로 쇼케이스:
+//! 1. 하드웨어 탐색 및 디바이스 선택 (`CPU`, `GPU:0`, ...)
+//! 2. 다중 가상 디바이스 기반 데이터 병렬 학습 (`DataParallel` + `ring_all_reduce`)
+//! 3. 체크포인트 저장 및 이식 가능한 추론 모델 내보내기 (`.rtim`)
+//! 4. 연산자 융합 및 시스톨릭 어레이 텔레메트리를 지원하는 **NPU** 추론 (`ExecutionProvider::Npu(Int8 / Fp16)`)
 //!
-//! Run with:
+//! 실행 방법:
 //! ```bash
 //! cargo run --example end_to_end
 //! ```
@@ -13,6 +12,7 @@
 use rustgears::data::datasets;
 use rustgears::prelude::*;
 
+/// 3개 클래스 분류를 위한 다층 퍼셉트론(MLP) 모델 빌더 함수.
 fn build_mlp() -> Sequential {
     Sequential::new()
         .add(Linear::new(2, 64))
@@ -30,7 +30,7 @@ fn main() {
     println!("======================================================================\n");
 
     // ------------------------------------------------------------------
-    // 1. Hardware & device selection
+    // 1. 하드웨어 탐색 및 연산 디바이스 선택
     // ------------------------------------------------------------------
     println!("[1] Discovered training devices:");
     for info in list_devices() {
@@ -40,7 +40,7 @@ fn main() {
     println!("    -> Selected primary device: {primary} ({})\n", primary.backend().name());
 
     // ------------------------------------------------------------------
-    // 2. Dataset preparation (3-class non-linear spiral classification)
+    // 2. 데이터셋 준비 (3-클래스 비선형 나선형 데이터)
     // ------------------------------------------------------------------
     manual_seed(42);
     let dataset = datasets::spirals(240, 3, 0.18, 42);
@@ -53,7 +53,7 @@ fn main() {
     );
 
     // ------------------------------------------------------------------
-    // 3. Multi-GPU Data-Parallel training (Ring All-Reduce)
+    // 3. 다중 디바이스 데이터 병렬 학습 (Ring All-Reduce)
     // ------------------------------------------------------------------
     let dp_devices = vec![Device::Gpu(0), Device::Gpu(1), Device::Gpu(2), Device::Gpu(3)];
     println!("[3] Initialising DataParallel across {} devices: {:?}", dp_devices.len(), dp_devices);
@@ -71,6 +71,7 @@ fn main() {
         let mut steps = 0;
         let mut last_report = None;
         for (xb, yb) in loader.iter() {
+            // fit_batch: scatter -> parallel forward/backward -> ring all-reduce -> opt.step -> broadcast
             let rep = dp.fit_batch(&xb, &yb, cross_entropy, &mut opt);
             epoch_loss += rep.loss;
             steps += 1;
@@ -95,7 +96,7 @@ fn main() {
     }
 
     // ------------------------------------------------------------------
-    // 4. Save checkpoint & portable inference model
+    // 4. 체크포인트 및 이식 가능한 추론 전용 모델(.rtim) 내보내기
     // ------------------------------------------------------------------
     let model = dp.module();
     let rtim_path = std::env::temp_dir().join("spiral_mlp.rtim");
@@ -103,7 +104,7 @@ fn main() {
     println!("\n[4] Exported portable inference graph to: {}", rtim_path.display());
 
     // ------------------------------------------------------------------
-    // 5. Execute on NPU (INT8 & FP16) vs GPU vs CPU
+    // 5. 다양한 실행 공급자(CPU, GPU, NPU FP16, NPU INT8)에서 추론 실행 비교
     // ------------------------------------------------------------------
     println!("\n[5] Running inference across execution providers:");
     let layers = load_inference_layers(&rtim_path).expect("load rtim");

@@ -1,15 +1,13 @@
-//! GPU backend.
+//! GPU 연산 백엔드.
 //!
-//! * With the `gpu` cargo feature (default) real GPUs are discovered through
-//!   [wgpu](https://wgpu.rs) (Vulkan / DirectX 12 / Metal) and kernels run as
-//!   WGSL compute shaders.
-//! * Device ordinals beyond the number of physical GPUs (or every ordinal when
-//!   no GPU is present) map to *virtual GPUs* that execute on the CPU. This lets
-//!   multi-GPU code (e.g. [`DataParallel`](crate::parallel::DataParallel)) run
-//!   unchanged on any machine.
+//! * `gpu` 카고 기능(기본 활성화)이 켜져 있으면 [wgpu](https://wgpu.rs) (Vulkan / DirectX 12 / Metal)를 통해
+//!   물리 GPU를 자동 탐지하고 WGSL 컴퓨트 셰이더로 수치 연산 커널을 실행합니다.
+//! * 시스템의 물리 GPU 개수를 초과하는 디바이스 서수(또는 GPU가 없는 시스템의 모든 서수)는
+//!   CPU에서 동작하는 *가상 GPU*로 투명하게 폴백(fallback)됩니다. 덕분에 멀티 GPU 분산 학습 코드
+//!   ([`DataParallel`](crate::parallel::DataParallel) 등)를 GPU가 없는 머신에서도 동일하게 실행할 수 있습니다.
 //!
-//! Small workloads are executed on the CPU because the host<->device transfer
-//! would dominate; see [`set_offload_threshold`].
+//! 작은 크기의 연산은 PCIe 버스를 통한 호스트<->디바이스 간 데이터 복사 오버헤드가 더 크므로
+//! 자동으로 초고속 CPU 커널에서 실행됩니다 (자세한 설정은 [`set_offload_threshold`] 참조).
 
 use super::backend::{Backend, BinaryOp, UnaryOp};
 use super::cpu::CpuBackend;
@@ -20,29 +18,32 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[cfg(feature = "gpu")]
 mod wgpu_impl;
 
-/// Minimum `m*k*n` for a matmul to be sent to the GPU.
-/// Default is set to 64M multiply-adds so small/medium matrices run immediately
-/// on the AVX2+FMA Rayon CPU microkernel without host<->device PCIe/fence stalls.
+/// 행렬 곱셈을 GPU로 오프로드하기 위한 최소 `m * k * n` 기준값.
+/// 기본값은 약 6,400만 연산으로 설정되어 있어, 중소형 행렬은 호스트-디바이스 PCIe 왕복 지연 없이
+/// AVX2+FMA Rayon CPU 커널에서 즉시 실행됩니다.
 static MATMUL_THRESHOLD: AtomicUsize = AtomicUsize::new(512 * 512 * 256);
-/// Minimum element count for an element-wise op to be sent to the GPU.
+/// 요소별 연산(Element-wise)을 GPU로 오프로드하기 위한 최소 원소 개수 기준값
 static ELEMWISE_THRESHOLD: AtomicUsize = AtomicUsize::new(4 << 20);
 
-/// Configure when work is offloaded to a physical GPU.
+/// 연산 작업을 물리 GPU로 오프로드할 임계값을 설정합니다.
 ///
-/// * `matmul_flops` – minimum `m*k*n` for matrix multiplication.
-/// * `elementwise` – minimum number of elements for element-wise kernels.
+/// * `matmul_flops` – 행렬 곱셈 시 GPU로 보낼 최소 `m * k * n` 연산량.
+/// * `elementwise` – 요소별 커널 실행 시 GPU로 보낼 최소 원소 개수.
 ///
-/// Use `set_offload_threshold(0, 0)` to force every kernel onto the GPU.
+/// 모든 연산을 무조건 GPU에서 실행하도록 강제하려면 `set_offload_threshold(0, 0)`을 호출하십시오.
 pub fn set_offload_threshold(matmul_flops: usize, elementwise: usize) {
     MATMUL_THRESHOLD.store(matmul_flops, Ordering::Relaxed);
     ELEMWISE_THRESHOLD.store(elementwise, Ordering::Relaxed);
 }
 
-/// Information about a physical GPU adapter.
+/// 물리 GPU 어댑터의 세부 정보 구조체
 #[derive(Clone, Debug)]
 pub struct GpuAdapterInfo {
+    /// 어댑터 장치 이름
     pub name: String,
+    /// 그래픽/컴퓨트 API 백엔드
     pub api: String,
+    /// 장치 종류 (예: 외장 GPU, 통합 GPU)
     pub device_type: String,
 }
 
@@ -57,7 +58,7 @@ fn contexts() -> &'static Vec<Arc<wgpu_impl::GpuContext>> {
     })
 }
 
-/// Number of physical GPUs usable by the library.
+/// 라이브러리에서 감지되어 사용 가능한 물리 GPU의 개수를 반환합니다.
 pub fn physical_count() -> usize {
     #[cfg(feature = "gpu")]
     {
@@ -69,7 +70,7 @@ pub fn physical_count() -> usize {
     }
 }
 
-/// Information about every physical GPU.
+/// 감지된 모든 물리 GPU의 정보를 담은 벡터를 반환합니다.
 pub fn adapters() -> Vec<GpuAdapterInfo> {
     #[cfg(feature = "gpu")]
     {
@@ -81,7 +82,7 @@ pub fn adapters() -> Vec<GpuAdapterInfo> {
     }
 }
 
-/// Backend for GPU ordinal `index`.
+/// 지정된 서수(`index`)에 매핑되는 GPU 백엔드 구조체
 pub struct GpuBackend {
     index: usize,
     #[cfg(feature = "gpu")]
@@ -90,7 +91,7 @@ pub struct GpuBackend {
 }
 
 impl GpuBackend {
-    /// `true` if this ordinal maps to real GPU hardware.
+    /// 이 서수가 실제 물리 GPU 하드웨어에 매핑되어 있는지 여부를 반환합니다.
     pub fn is_physical(&self) -> bool {
         #[cfg(feature = "gpu")]
         {
@@ -119,6 +120,7 @@ impl Backend for GpuBackend {
                 return ctx.matmul(a, b, m, k, n);
             }
         }
+        // 임계값 미만이거나 GPU가 없는 경우 CPU 커널로 실행
         self.cpu.matmul(a, b, m, k, n)
     }
 
@@ -143,7 +145,7 @@ impl Backend for GpuBackend {
     }
 }
 
-/// Get (or lazily create) the backend for GPU ordinal `index`.
+/// 지정된 서수(`index`)에 대한 GPU 백엔드를 가져오거나 지연 생성(캐싱)합니다.
 pub fn backend(index: usize) -> Arc<GpuBackend> {
     static CACHE: OnceLock<Mutex<HashMap<usize, Arc<GpuBackend>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));

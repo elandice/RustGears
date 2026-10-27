@@ -1,8 +1,9 @@
-//! wgpu (Vulkan / DX12 / Metal) implementation of the GPU kernels with pooled VRAM buffers.
+//! 풀링된 VRAM 버퍼를 활용하는 wgpu (Vulkan / DX12 / Metal) 기반 GPU 커널 구현 모듈.
 
 use super::GpuAdapterInfo;
 use std::sync::Mutex;
 
+/// 타일 기반 GPU 행렬 곱셈 WGSL 컴퓨트 셰이더
 const MATMUL_WGSL: &str = r#"
 struct Dims { m: u32, k: u32, n: u32, pad: u32 };
 
@@ -14,8 +15,8 @@ struct Dims { m: u32, k: u32, n: u32, pad: u32 };
 var<workgroup> ta: array<array<f32, 16>, 16>;
 var<workgroup> tb: array<array<f32, 16>, 16>;
 
-// Tiled matrix multiplication: every 16x16 workgroup computes one output tile,
-// staging tiles of A and B in fast workgroup (shared) memory.
+// 타일 기반 행렬 곱셈: 각 16x16 워크그룹이 하나의 출력 타일을 계산하며,
+// A와 B의 타일을 고속 워크그룹(공유) 메모리에 임시 적재하여 대역폭을 절약합니다.
 @compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
@@ -48,6 +49,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 }
 "#;
 
+/// 요소별 연산(단항/이항) 처리를 위한 WGSL 컴퓨트 셰이더
 const ELEMWISE_WGSL: &str = r#"
 struct Params { op: u32, len: u32, pad0: u32, pad1: u32 };
 
@@ -85,7 +87,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 }
 "#;
 
-/// Reusable GPU buffer pool to eliminate per-operation buffer allocation overhead.
+/// 연산마다 GPU 버퍼를 생성하고 파괴하는 오버헤드를 방지하기 위한 재사용 버퍼 풀
 struct BufferPool {
     a: Option<(wgpu::Buffer, u64)>,
     b: Option<(wgpu::Buffer, u64)>,
@@ -95,6 +97,7 @@ struct BufferPool {
 }
 
 impl BufferPool {
+    /// 새 버퍼 풀을 생성합니다.
     fn new(device: &wgpu::Device) -> Self {
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniform"),
@@ -111,6 +114,7 @@ impl BufferPool {
         }
     }
 
+    /// 버퍼 용량이 부족할 경우 지수적으로 확장하여 버퍼를 보장합니다.
     fn ensure_storage<'a>(
         slot: &'a mut Option<(wgpu::Buffer, u64)>,
         device: &wgpu::Device,
@@ -136,6 +140,7 @@ impl BufferPool {
     }
 }
 
+/// 단일 물리 GPU 디바이스의 실행 컨텍스트
 pub struct GpuContext {
     pub info: GpuAdapterInfo,
     device: wgpu::Device,
@@ -145,7 +150,7 @@ pub struct GpuContext {
     pool: Mutex<BufferPool>,
 }
 
-/// Enumerate physical GPUs and create a device + pipelines for each.
+/// 시스템의 물리 GPU 어댑터를 열거하고 각각에 대해 디바이스 및 컴퓨트 파이프라인을 초기화합니다.
 pub fn discover() -> Vec<GpuContext> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
@@ -221,6 +226,7 @@ pub fn discover() -> Vec<GpuContext> {
 }
 
 impl GpuContext {
+    /// 사전 풀링된 VRAM 버퍼를 바인딩하고 지정된 컴퓨트 파이프라인을 실행합니다.
     fn execute_pooled(
         &self,
         pipeline: &wgpu::ComputePipeline,
@@ -290,12 +296,14 @@ impl GpuContext {
         result
     }
 
+    /// WGSL 셰이더를 사용하여 GPU에서 행렬 곱셈(`A @ B`)을 수행합니다.
     pub fn matmul(&self, a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
         let gx = n.div_ceil(16) as u32;
         let gy = m.div_ceil(16) as u32;
         self.execute_pooled(&self.matmul, a, b, [m as u32, k as u32, n as u32, 0], m * n, (gx, gy))
     }
 
+    /// WGSL 셰이더를 사용하여 GPU에서 요소별 수치 연산을 수행합니다.
     pub fn elementwise(&self, op: u32, a: &[f32], b: Option<&[f32]>) -> Vec<f32> {
         let len = a.len();
         let dummy = [0.0f32; 4];

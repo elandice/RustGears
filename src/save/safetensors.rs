@@ -1,4 +1,4 @@
-//! Hugging Face Safetensors weight interchange (native tensors store `f32`).
+//! Hugging Face Safetensors 가중치 직렬화 및 상호 운용 (네이티브 텐서는 `f32` 저장).
 
 use super::{apply_state_dict, invalid_data};
 use crate::{nn::Module, tensor::Tensor};
@@ -6,9 +6,10 @@ use ::safetensors::tensor::{serialize_to_file, Dtype, SafeTensorError, SafeTenso
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::{io, path::Path};
 
-/// Save parameters and buffers as interoperable `F32` Safetensors tensors.
-/// Tensor names and layouts are preserved, including RustGears's `[in, out]`
-/// Linear weights; PyTorch Linear weights use `[out, in]` instead.
+/// 매개변수와 버퍼를 상호 호환 가능한 `F32` Safetensors 파일로 저장합니다.
+///
+/// 텐서의 이름과 레이아웃이 보존됩니다 (RustGears의 Linear 가중치는 `[in, out]`을
+/// 사용하며, PyTorch의 Linear 가중치는 `[out, in]`을 사용합니다).
 pub fn save_safetensors(module: &dyn Module, path: impl AsRef<Path>) -> io::Result<()> {
     let mut owned = BTreeMap::new();
     for (name, tensor) in module.state_dict() {
@@ -30,25 +31,27 @@ pub fn save_safetensors(module: &dyn Module, path: impl AsRef<Path>) -> io::Resu
     })
 }
 
-/// Read named `F32`, `F16`, or `BF16` weights into CPU `f32` tensors.
+/// Safetensors 파일에서 `F32`, `F16`, `BF16` 형식의 가중치를 읽어 CPU `f32` 텐서 맵으로 반환합니다.
 ///
-/// Use this to map external parameter names and transpose external Linear
-/// weights before copying them into a RustGears model. Unsupported dtypes are
-/// reported as errors; no integer or quantized weights are silently cast.
+/// 외부 모델 가중치를 RustGears에 로드하기 전에 이름 매핑이나 Linear 가중치 전치(`[out, in]` → `[in, out]`)
+/// 등의 전처리를 수행할 때 사용합니다. 지원되지 않는 데이터 타입은 에러로 처리되며 묵시적 캐스팅은 수행되지 않습니다.
 pub fn read_safetensors(path: impl AsRef<Path>) -> io::Result<HashMap<String, Tensor>> {
     let bytes = std::fs::read(path)?;
     decode(&bytes, None)
 }
 
-/// Load weights by exact name and shape, preserving the model's devices and
-/// gradient flags. All tensors are checked before any model state is changed.
-/// Additional tensors in the file are ignored, as with `load_state_dict`.
+/// 정확한 이름과 형태(Shape)를 기준으로 Safetensors 가중치를 모듈에 로드합니다.
+///
+/// 모델의 기존 디바이스 배치 및 그래디언트 활성화 플래그는 보존됩니다.
+/// 실제 파라미터가 수정되기 전에 모든 텐서의 일치 여부를 미리 검증합니다.
+/// 파일에 포함된 추가적인(모듈에 없는) 텐서는 무시됩니다.
 pub fn load_safetensors(module: &dyn Module, path: impl AsRef<Path>) -> io::Result<()> {
     let names: HashSet<_> = module.state_dict().into_iter().map(|(name, _)| name).collect();
     let bytes = std::fs::read(path)?;
     apply_state_dict(module, &decode(&bytes, Some(&names))?)
 }
 
+/// 바이트 슬라이스로부터 Safetensors 포맷을 역직렬화하고 `Tensor` 맵을 구성합니다.
 fn decode(bytes: &[u8], names: Option<&HashSet<String>>) -> io::Result<HashMap<String, Tensor>> {
     let file = SafeTensors::deserialize(bytes).map_err(invalid_data)?;
     file.iter()
@@ -73,6 +76,7 @@ fn decode(bytes: &[u8], names: Option<&HashSet<String>>) -> io::Result<HashMap<S
         .collect()
 }
 
+/// IEEE 754 half-precision(16비트 부동소수점) 비트를 32비트 f32로 변환합니다.
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits & 0x8000) as u32) << 16;
     let exponent = ((bits >> 10) & 0x1f) as u32;
